@@ -1,8 +1,6 @@
 # Antigravity Booster
 
-<p align="center">
-  <h2>专为 Antigravity 打造的高颜值效能增强工具</h2>
-</p>
+<h2 align="center">专为 Antigravity 打造的高颜值效能增强工具</h2>
 
 <p align="center">
   <a href="#特性">特性</a> •
