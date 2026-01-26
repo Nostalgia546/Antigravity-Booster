@@ -1,17 +1,13 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, watch } from "vue";
+import { ref, onMounted, watch } from "vue";
 import { 
   LayoutDashboard, 
   Users, 
-  Settings, 
   Sun, 
   Moon, 
-  Zap, 
   ZapOff,
-  ShieldCheck,
   Plus,
   Trash2,
-  Terminal,
   Activity,
   Globe,
   RefreshCw,
@@ -20,7 +16,7 @@ import {
   Download,
   Info
 } from "lucide-vue-next";
-import { useAppStore, type Account } from "./stores/app";
+import { useAppStore } from "./stores/app";
 import { invoke } from "@tauri-apps/api/core";
 
 const store = useAppStore();
@@ -151,32 +147,7 @@ const switchAccount = async (id: string) => {
   }
 };
 
-const handleUpdateConfig = async () => {
-  try {
-    await invoke("set_config", { config: store.proxyConfig });
-    store.addLog("代理配置已更新");
-  } catch (err) {
-    store.addLog(`配置保存失败: ${err}`);
-  }
-};
 
-const toggleBoost = async () => {
-  try {
-    if (store.isBoosted) {
-      await invoke("stop_boosting");
-      store.isBoosted = false;
-      store.addLog("加速服务停止...");
-    } else {
-      await invoke("start_boosting", { config: store.proxyConfig });
-      store.isBoosted = true;
-      store.addLog(`加速已开启 (系统代理模式)`);
-    }
-  } catch (err) {
-    store.addLog(`加速启动失败: ${err}`);
-  }
-};
-
-import { ask } from "@tauri-apps/plugin-dialog";
 
 // Custom confirmation dialog state
 const showDeleteConfirm = ref(false);
@@ -476,13 +447,13 @@ const refreshAllQuotas = async () => {
                 <!-- Stacked bar -->
                 <div v-if="bucket.items.length > 0"
                      :style="{
-                       height: Math.min(160, Math.max(3, (bucket.items.reduce((sum, item) => sum + item.usage, 0) / Math.min(chartData.max_usage, 25)) * 160)) + 'px',
+                       height: Math.min(160, Math.max(3, (bucket.items.reduce((sum: number, item: any) => sum + item.usage, 0) / Math.min(chartData.max_usage, 25)) * 160)) + 'px',
                        background: bucket.items.length === 1 
                          ? bucket.items[0].color 
-                         : `linear-gradient(to top, ${bucket.items.map((item, i) => {
-                             const prevHeight = bucket.items.slice(0, i).reduce((sum, it) => sum + it.usage, 0);
+                         : `linear-gradient(to top, ${bucket.items.map((item: any, i: number) => {
+                             const prevHeight = bucket.items.slice(0, i).reduce((sum: number, it: any) => sum + it.usage, 0);
                              const currHeight = prevHeight + item.usage;
-                             const totalHeight = bucket.items.reduce((sum, it) => sum + it.usage, 0);
+                             const totalHeight = bucket.items.reduce((sum: number, it: any) => sum + it.usage, 0);
                              const startPct = (prevHeight / totalHeight * 100).toFixed(1);
                              const endPct = (currHeight / totalHeight * 100).toFixed(1);
                              return `${item.color} ${startPct}% ${endPct}%`;
@@ -491,7 +462,7 @@ const refreshAllQuotas = async () => {
                        transition: 'height 0.3s',
                        cursor: 'pointer'
                      }"
-                     :title="bucket.items.map(item => `${item.account_name} - ${item.model_name}: ${item.usage.toFixed(1)}%`).join('\n')">
+                     :title="bucket.items.map((item: any) => `${item.account_name} - ${item.model_name}: ${item.usage.toFixed(1)}%`).join('\n')">
                 </div>
                 <div v-else style="height: 3px; background: rgba(255,255,255,0.05); border-radius: 2px;"></div>
               </div>

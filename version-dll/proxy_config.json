@@ -1,0 +1,13 @@
+{
+    "proxy": {
+        "type": "http",
+        "host": "127.0.0.1",
+        "port": 7890
+    },
+    "timeout": {
+        "connect_ms": 5000,
+        "recv_ms": 5000,
+        "send_ms": 5000
+    },
+    "ipv6_mode": "block"
+}

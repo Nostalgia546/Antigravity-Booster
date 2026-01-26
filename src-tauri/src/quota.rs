@@ -41,7 +41,7 @@ struct QuotaInfo {
     reset_time: Option<String>,
 }
 
-pub async fn fetch_account_quota_real(access_token: &str, email: &str, proxy_url: Option<String>) -> Result<(QuotaData, String, String), String> {
+pub async fn fetch_account_quota_real(access_token: &str, _email: &str, proxy_url: Option<String>) -> Result<(QuotaData, String, String), String> {
     let mut debug_log = String::new();
     debug_log.push_str("Starting fetch_account_quota_real...\n");
 
