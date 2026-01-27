@@ -98,14 +98,20 @@ const refreshQuota = async (id: string) => {
 
 const chartData = ref<any>(null);
 const chartTimeRange = ref<number>(1); // 1, 3, or 7 days
+const isLoadingChart = ref(false);
+const chartKey = ref(0); // 用于触发动画
 
 const loadChartData = async () => {
+  isLoadingChart.value = true;
   try {
     const displayMinutes = chartTimeRange.value * 24 * 60; // Convert days to minutes
     const bucketMinutes = chartTimeRange.value === 1 ? 30 : (chartTimeRange.value === 3 ? 60 : 120); // Adjust bucket size
     chartData.value = await invoke("get_usage_chart", { displayMinutes, bucketMinutes });
+    chartKey.value++; // 触发重新渲染和动画
   } catch (err) {
     console.error("Failed to load chart data:", err);
+  } finally {
+    isLoadingChart.value = false;
   }
 };
 
@@ -530,15 +536,17 @@ onMounted(async () => {
             </div>
           </div>
           
-          <div v-if="chartData && chartData.buckets.length > 0" style="padding: 1rem 0;">
+          <div v-if="chartData && chartData.buckets.length > 0" :key="chartKey" class="chart-fade-in" style="padding: 1rem 0;">
             <!-- Chart bars -->
             <div style="display: flex; align-items: flex-end; gap: 2px; height: 180px; margin-bottom: 1rem;">
               <div v-for="(bucket, idx) in chartData.buckets" :key="idx"
                    style="flex: 1; display: flex; flex-direction: column; justify-content: flex-end; position: relative;">
                 <!-- Stacked bar -->
                 <div v-if="bucket.items.length > 0"
+                     class="bar-animate"
                      :style="{
                        height: Math.min(160, Math.max(3, (bucket.items.reduce((sum: number, item: any) => sum + item.usage, 0) / chartData.max_usage) * 160)) + 'px',
+                       animationDelay: (idx * 0.01) + 's',
                        background: bucket.items.length === 1 
                          ? bucket.items[0].color 
                          : `linear-gradient(to top, ${bucket.items.map((item: any, i: number) => {

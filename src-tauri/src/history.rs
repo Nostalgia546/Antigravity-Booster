@@ -138,10 +138,17 @@ pub fn calculate_usage_buckets(
     }
     
     let now = chrono::Utc::now().timestamp();
-    let start_time = now - display_minutes * 60;
+    
+    // 将结束时间对齐到 bucket_minutes 的整数倍
+    // 例如: 如果现在是 19:33，bucket_minutes=30，则对齐到 19:30
+    let bucket_seconds = bucket_minutes * 60;
+    let aligned_end = (now / bucket_seconds) * bucket_seconds;
+    
+    // 从对齐的结束时间往回推 display_minutes
+    let start_time = aligned_end - display_minutes * 60;
     let bucket_count = (display_minutes / bucket_minutes) as usize;
     
-    // Initialize buckets
+    // Initialize buckets - 从 start_time 开始，每个桶都对齐
     let mut buckets: Vec<UsageBucket> = (0..bucket_count).map(|i| {
         let b_start = start_time + (i as i64) * bucket_minutes * 60;
         UsageBucket {

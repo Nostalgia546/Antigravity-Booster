@@ -538,3 +538,27 @@ body {
 .btn:disabled:hover {
     transform: none !important;
 }
+
+/* Chart Animation */
+.chart-fade-in {
+    animation: fadeIn 0.3s ease-out forwards;
+}
+
+@keyframes growUp {
+    from {
+        transform: scaleY(0);
+        opacity: 0.5;
+    }
+
+    to {
+        transform: scaleY(1);
+        opacity: 1;
+    }
+}
+
+.bar-animate {
+    transform-origin: bottom;
+    transform: scaleY(0);
+    opacity: 0;
+    animation: growUp 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
