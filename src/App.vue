@@ -113,6 +113,28 @@ watch(chartTimeRange, () => {
   loadChartData();
 });
 
+// 格式化时间段显示
+const formatBucketTooltip = (bucket: any) => {
+  const startDate = new Date(bucket.start_time * 1000);
+  const endDate = new Date(bucket.end_time * 1000);
+  
+  const formatTime = (date: Date) => {
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    return `${month}-${day} ${hours}:${minutes}`;
+  };
+  
+  const timeRange = `${formatTime(startDate)} ~ ${formatTime(endDate)}`;
+  const usageInfo = bucket.items.map((item: any) => 
+    `${item.account_name} - ${item.model_name}: ${item.usage.toFixed(1)}%`
+  ).join('\n');
+  
+  return `${timeRange}\n${usageInfo}`;
+};
+
+
 import { listen } from '@tauri-apps/api/event';
 
 onMounted(async () => {
@@ -531,7 +553,7 @@ onMounted(async () => {
                        transition: 'height 0.3s',
                        cursor: 'pointer'
                      }"
-                     :title="bucket.items.map((item: any) => `${item.account_name} - ${item.model_name}: ${item.usage.toFixed(1)}%`).join('\n')">
+                     :title="formatBucketTooltip(bucket)">
                 </div>
                 <div v-else style="height: 3px; background: rgba(255,255,255,0.05); border-radius: 2px;"></div>
               </div>
@@ -653,7 +675,7 @@ onMounted(async () => {
               <img src="./assets/logo.png" style="width: 120px; height: 120px; border-radius: 28px; box-shadow: 0 15px 35px rgba(0,0,0,0.15); object-fit: cover; margin: 0 auto;" />
             </div>
             <h1 style="font-size: 2.25rem; font-weight: 800; margin-bottom: 0.5rem; color: var(--text-primary); letter-spacing: -0.025em;">Antigravity Booster</h1>
-            <p style="color: var(--text-secondary); font-size: 0.875rem; margin-bottom: 2rem; font-family: 'JetBrains Mono', monospace;">Version 2.0.0 (Build 20260127)</p>
+            <p style="color: var(--text-secondary); font-size: 0.875rem; margin-bottom: 2rem; font-family: 'JetBrains Mono', monospace;">Version 1.1.0 (Build 20260127)</p>
             
             <div style="max-width: 550px; margin: 0 auto 2.5rem; line-height: 1.8; color: var(--text-secondary); font-size: 0.95rem;">
               Antigravity Booster 是专门为您打造的效能增强助手。不仅解决了复杂的网络代理问题，更提供了优雅的多账号管理体验。
