@@ -536,41 +536,43 @@ onMounted(async () => {
             </div>
           </div>
           
-          <div v-if="chartData && chartData.buckets.length > 0" :key="chartKey" class="chart-fade-in" style="padding: 1rem 0;">
-            <!-- Chart bars -->
-            <div style="display: flex; align-items: flex-end; gap: 2px; height: 180px; margin-bottom: 1rem;">
-              <div v-for="(bucket, idx) in chartData.buckets" :key="idx"
-                   style="flex: 1; display: flex; flex-direction: column; justify-content: flex-end; position: relative;">
-                <!-- Stacked bar -->
-                <div v-if="bucket.items.length > 0"
-                     class="bar-animate"
-                     :style="{
-                       height: Math.min(160, Math.max(3, (bucket.items.reduce((sum: number, item: any) => sum + item.usage, 0) / chartData.max_usage) * 160)) + 'px',
-                       animationDelay: (idx * 0.01) + 's',
-                       background: bucket.items.length === 1 
-                         ? bucket.items[0].color 
-                         : `linear-gradient(to top, ${bucket.items.map((item: any, i: number) => {
-                             const prevHeight = bucket.items.slice(0, i).reduce((sum: number, it: any) => sum + it.usage, 0);
-                             const currHeight = prevHeight + item.usage;
-                             const totalHeight = bucket.items.reduce((sum: number, it: any) => sum + it.usage, 0);
-                             const startPct = (prevHeight / totalHeight * 100).toFixed(1);
-                             const endPct = (currHeight / totalHeight * 100).toFixed(1);
-                             return `${item.color} ${startPct}% ${endPct}%`;
-                           }).join(', ')})`,
-                       borderRadius: '2px 2px 0 0',
-                       transition: 'height 0.3s',
-                       cursor: 'pointer'
-                     }"
-                     :title="formatBucketTooltip(bucket)">
+          <div v-if="chartData && chartData.buckets.length > 0" style="padding: 1rem 0;">
+            <div :key="chartKey" class="chart-fade-in">
+              <!-- Chart bars -->
+              <div style="display: flex; align-items: flex-end; gap: 2px; height: 180px; margin-bottom: 1rem;">
+                <div v-for="(bucket, idx) in chartData.buckets" :key="idx"
+                     style="flex: 1; display: flex; flex-direction: column; justify-content: flex-end; position: relative;">
+                  <!-- Stacked bar -->
+                  <div v-if="bucket.items.length > 0"
+                       class="bar-animate"
+                       :style="{
+                         height: Math.min(160, Math.max(3, (bucket.items.reduce((sum, item) => sum + item.usage, 0) / chartData.max_usage) * 160)) + 'px',
+                         animationDelay: (idx * 0.01) + 's',
+                         background: bucket.items.length === 1 
+                           ? bucket.items[0].color 
+                           : `linear-gradient(to top, ${bucket.items.map((item, i) => {
+                               const prevHeight = bucket.items.slice(0, i).reduce((sum, it) => sum + it.usage, 0);
+                               const currHeight = prevHeight + item.usage;
+                               const totalHeight = bucket.items.reduce((sum, it) => sum + it.usage, 0);
+                               const startPct = (prevHeight / totalHeight * 100).toFixed(1);
+                               const endPct = (currHeight / totalHeight * 100).toFixed(1);
+                               return `${item.color} ${startPct}% ${endPct}%`;
+                             }).join(', ')})`,
+                         borderRadius: '2px 2px 0 0',
+                         transition: 'height 0.3s',
+                         cursor: 'pointer'
+                       }"
+                       :title="formatBucketTooltip(bucket)">
+                  </div>
+                  <div v-else style="height: 3px; background: rgba(255,255,255,0.05); border-radius: 2px;"></div>
                 </div>
-                <div v-else style="height: 3px; background: rgba(255,255,255,0.05); border-radius: 2px;"></div>
               </div>
-            </div>
-            
-            <!-- Legend -->
-            <div style="display: flex; justify-content: space-between; align-items: center; font-size: 0.7rem; color: var(--text-secondary);">
-              <span>最近 {{ chartData.display_minutes / 60 }} 小时 · {{ chartData.interval }}分/柱</span>
-              <span style="font-size: 0.65rem;">仅在软件运行时记录 · 每 5 分钟自动刷新</span>
+              
+              <!-- Legend -->
+              <div style="display: flex; justify-content: space-between; align-items: center; font-size: 0.7rem; color: var(--text-secondary);">
+                <span>最近 {{ chartData.display_minutes / 60 }} 小时 · {{ chartData.interval }}分/柱</span>
+                <span style="font-size: 0.65rem;">仅在软件运行时记录 · 每 5 分钟自动刷新</span>
+              </div>
             </div>
           </div>
           
