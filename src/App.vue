@@ -691,7 +691,7 @@ onMounted(async () => {
             </div>
 
             <div style="padding-top: 2.5rem; border-top: 1px solid var(--border); font-size: 0.8rem; color: var(--text-secondary); display: flex; justify-content: center; align-items: center; gap: 1.5rem;">
-              <span>&copy; 2026 Antigravity Team</span>
+              <span>&copy; 2026 Nostalgia546</span>
               <span style="color: var(--border);">|</span>
               <span>Licensed under GPL-3.0</span>
             </div>
