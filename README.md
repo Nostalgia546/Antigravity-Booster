@@ -36,7 +36,34 @@ Antigravity Booster 是一款专门为 Antigravity 用户设计的辅助增强�
 
 #### 下载安装
 
-如果您使用的是Windows系统，您可以直接从 Releases 页面下载最新的 `.exe` 安装包进行安装。
+如果您使用的是Windows系统，您可以直接从 [Releases](../../releases) 页面下载最新的 `.exe` 安装包进行安装。
+
+**安装步骤：**
+
+1. 下载最新版本的 `antigravity-booster_x.x.x_x64-setup.exe`
+2. 双击运行安装程序
+3. 如果出现 **Windows SmartScreen 警告**（见下方说明），点击"更多信息" → "仍要运行"
+4. 按照安装向导完成安装
+
+#### ⚠️ 关于 Windows SmartScreen 警告
+
+由于本应用是**开源免费软件**，未购买代码签名证书（约 $300-500/年），Windows 可能会显示 SmartScreen 警告。**这是正常现象，应用是安全的。**
+
+**如何绕过警告：**
+
+<p align="center">
+  <img width="500" alt="SmartScreen 警告" src="https://github.com/user-attachments/assets/your-screenshot-here" />
+</p>
+
+1. 当出现蓝色警告窗口时，点击 **"更多信息"** 链接
+2. 会出现 **"仍要运行"** 按钮
+3. 点击即可继续安装
+
+**为什么会有警告？**
+- 应用未购买商业代码签名证书
+- 这是个人开源项目，无法负担高额签名费用
+- 您可以查看 [源代码](../../) 确认安全性
+- 随着下载量增加，警告会逐渐减少
 
 #### 基本使用
 
