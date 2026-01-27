@@ -132,8 +132,17 @@ onMounted(async () => {
 });
 
 // Actions
+const isSwitchingAccount = ref(false);
+const switchingAccountId = ref<string | null>(null);
+
 const switchAccount = async (id: string) => {
+  if (isSwitchingAccount.value) return;
+  
+  isSwitchingAccount.value = true;
+  switchingAccountId.value = id;
+  
   try {
+    store.addLog("正在切换账号...");
     const res = await invoke("switch_account", { id });
     await syncData();
     // Auto refresh usage on switch (Force await)
@@ -144,6 +153,9 @@ const switchAccount = async (id: string) => {
     }
   } catch (err) {
     store.addLog(`登录失败: ${err}`);
+  } finally {
+    isSwitchingAccount.value = false;
+    switchingAccountId.value = null;
   }
 };
 
@@ -389,8 +401,14 @@ const refreshAllQuotas = async () => {
                         {{ acc.account_type }}
                       </span>
                     </div>
-                    <button class="btn btn-primary" style="font-size: 0.7rem; padding: 0.4rem 0.8rem;" @click="switchAccount(acc.id)">
-                      登录
+                    <button 
+                      class="btn btn-primary" 
+                      style="font-size: 0.7rem; padding: 0.4rem 0.8rem; display: flex; align-items: center; gap: 0.25rem;" 
+                      @click="switchAccount(acc.id)"
+                      :disabled="isSwitchingAccount && switchingAccountId === acc.id"
+                    >
+                      <RefreshCw v-if="isSwitchingAccount && switchingAccountId === acc.id" :size="12" class="spin" />
+                      {{ isSwitchingAccount && switchingAccountId === acc.id ? '切换中...' : '登录' }}
                     </button>
                   </div>
                 </div>
@@ -556,11 +574,18 @@ const refreshAllQuotas = async () => {
             <button 
               class="btn" 
               :class="acc.is_active ? 'btn-ghost' : 'btn-primary'" 
-              style="width: 100%; font-size: 0.75rem;"
+              style="width: 100%; font-size: 0.75rem; display: flex; align-items: center; justify-content: center; gap: 0.5rem;"
               @click="switchAccount(acc.id)"
-              :disabled="acc.is_active"
+              :disabled="acc.is_active || (isSwitchingAccount && switchingAccountId === acc.id)"
             >
-              {{ acc.is_active ? '当前正在使用' : '切换至此账号' }}
+              <RefreshCw v-if="isSwitchingAccount && switchingAccountId === acc.id" :size="14" class="spin" />
+              {{ 
+                isSwitchingAccount && switchingAccountId === acc.id 
+                  ? '切换中...' 
+                  : acc.is_active 
+                    ? '当前正在使用' 
+                    : '切换至此账号' 
+              }}
             </button>
           </div>
         </div>

@@ -7,9 +7,23 @@ use tauri::Manager;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
-/// Get Antigravity installation directory
-fn get_antigravity_dir() -> Option<PathBuf> {
-    // Try common installation paths
+/// Get Antigravity installation directory with caching
+/// 优先使用配置中保存的路径，找到后自动保存
+fn get_antigravity_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
+    // 1. 优先尝试从配置文件读取已保存的路径
+    let config = crate::storage::load_config(app);
+    if let Some(saved_path) = &config.antigravity_executable {
+        let path = PathBuf::from(saved_path);
+        // 验证路径是否仍然有效
+        if path.join("Antigravity.exe").exists() {
+            println!("Using cached Antigravity path: {:?}", path);
+            return Some(path);
+        } else {
+            println!("Cached path invalid, will search again");
+        }
+    }
+    
+    // 2. 尝试常见安装路径
     let paths = vec![
         dirs::data_local_dir().map(|d| d.join("Programs/Antigravity")),
         dirs::home_dir().map(|d| d.join("AppData/Local/Programs/Antigravity")),
@@ -18,27 +32,66 @@ fn get_antigravity_dir() -> Option<PathBuf> {
     for path_opt in paths {
         if let Some(path) = path_opt {
             if path.join("Antigravity.exe").exists() {
+                println!("Found Antigravity at common path: {:?}", path);
+                // 保存到配置
+                save_antigravity_path(app, &path);
                 return Some(path);
             }
         }
     }
     
-    // Try to find from running process
+    // 3. 尝试从正在运行的进程中查找
     let mut system = System::new_all();
     system.refresh_all();
     
     for (_, process) in system.processes() {
         let name = process.name().to_lowercase();
-        if name.contains("antigravity") && !name.contains("booster") {
+        // 精确匹配 Antigravity.exe
+        if name == "antigravity.exe" {
             if let Some(exe_path) = process.exe() {
                 if let Some(parent) = exe_path.parent() {
-                    return Some(parent.to_path_buf());
+                    let path = parent.to_path_buf();
+                    println!("Found Antigravity from running process: {:?}", path);
+                    // 保存到配置
+                    save_antigravity_path(app, &path);
+                    return Some(path);
                 }
             }
         }
     }
     
     None
+}
+
+/// 保存 Antigravity 路径到配置文件
+fn save_antigravity_path(app: &tauri::AppHandle, path: &PathBuf) {
+    let mut config = crate::storage::load_config(app);
+    let path_str = path.to_string_lossy().to_string();
+    
+    // 只有当路径发生变化时才保存
+    if config.antigravity_executable.as_ref() != Some(&path_str) {
+        config.antigravity_executable = Some(path_str);
+        if let Err(e) = crate::storage::save_config(app, &config) {
+            eprintln!("Failed to save Antigravity path to config: {}", e);
+        } else {
+            println!("Saved Antigravity path to config");
+        }
+    }
+}
+
+/// 检测 Antigravity 是否正在运行
+fn is_antigravity_running() -> bool {
+    let mut system = System::new_all();
+    system.refresh_all();
+    
+    for (_, process) in system.processes() {
+        let name = process.name().to_lowercase();
+        // 精确匹配 Antigravity.exe，避免匹配到 Booster 或其他相关进程
+        if name == "antigravity.exe" {
+            return true;
+        }
+    }
+    false
 }
 
 /// Kill Antigravity process
@@ -73,7 +126,8 @@ fn wait_for_antigravity_exit(timeout_ms: u64) -> bool {
         let mut found = false;
         for (_, process) in system.processes() {
             let name = process.name().to_lowercase();
-            if name.contains("antigravity") && !name.contains("booster") {
+            // 精确匹配 Antigravity.exe
+            if name == "antigravity.exe" {
                 found = true;
                 break;
             }
@@ -106,8 +160,8 @@ fn restart_antigravity(antigravity_dir: &PathBuf) -> Result<(), String> {
 /// Enable system proxy for Antigravity
 pub fn enable_system_proxy(app: &tauri::AppHandle) -> Result<String, String> {
     // 1. Find Antigravity directory
-    let antigravity_dir = get_antigravity_dir()
-        .ok_or("无法找到 Antigravity 安装目录。请确保 Antigravity 正在运行。".to_string())?;
+    let antigravity_dir = get_antigravity_dir(app)
+        .ok_or("无法找到 Antigravity 安装目录。请确保 Antigravity 已安装或至少运行过一次。".to_string())?;
     
     println!("Found Antigravity directory: {:?}", antigravity_dir);
     
@@ -136,7 +190,23 @@ pub fn enable_system_proxy(app: &tauri::AppHandle) -> Result<String, String> {
         "version.dll 资源文件不存在。请确保已编译 DLL 并运行 update-dll.bat".to_string()
     })?;
     
-    // 3. Copy version.dll to Antigravity directory
+    // 3. 检测 Antigravity 是否正在运行
+    let was_running = is_antigravity_running();
+    
+    // 4. 如果正在运行，先关闭
+    if was_running {
+        kill_antigravity()?;
+        println!("Antigravity killed");
+        
+        // Wait for process to exit (max 5 seconds)
+        if !wait_for_antigravity_exit(5000) {
+            println!("Warning: Antigravity may still be running");
+        }
+    } else {
+        println!("Antigravity is not running, skipping kill step");
+    }
+    
+    // 5. Copy version.dll to Antigravity directory
     let target_path = antigravity_dir.join("version.dll");
     println!("Target DLL path: {:?}", target_path);
     
@@ -145,36 +215,38 @@ pub fn enable_system_proxy(app: &tauri::AppHandle) -> Result<String, String> {
     
     println!("DLL copied successfully");
     
-    // 4. Kill and restart Antigravity
-    kill_antigravity()?;
-    println!("Antigravity killed");
-    
-    // Wait for process to exit (max 5 seconds)
-    if !wait_for_antigravity_exit(5000) {
-        println!("Warning: Antigravity may still be running");
+    // 6. 如果之前在运行，重启
+    if was_running {
+        restart_antigravity(&antigravity_dir)?;
+        println!("Antigravity restarted");
+        Ok("已启用系统代理，Antigravity 已重启".to_string())
+    } else {
+        Ok("已启用系统代理。下次启动 Antigravity 时将自动生效。".to_string())
     }
-    
-    restart_antigravity(&antigravity_dir)?;
-    println!("Antigravity restarted");
-    
-    Ok("已启用系统代理，Antigravity 已重启".to_string())
 }
 
 /// Disable system proxy for Antigravity
-pub fn disable_system_proxy(_app: &tauri::AppHandle) -> Result<String, String> {
+pub fn disable_system_proxy(app: &tauri::AppHandle) -> Result<String, String> {
     // 1. Find Antigravity directory
-    let antigravity_dir = get_antigravity_dir()
-        .ok_or("无法找到 Antigravity 安装目录。请确保 Antigravity 正在运行。".to_string())?;
+    let antigravity_dir = get_antigravity_dir(app)
+        .ok_or("无法找到 Antigravity 安装目录。请确保 Antigravity 已安装或至少运行过一次。".to_string())?;
     
     println!("Found Antigravity directory: {:?}", antigravity_dir);
     
-    // 2. Kill Antigravity FIRST (before trying to delete DLL)
-    kill_antigravity()?;
-    println!("Antigravity killed");
+    // 2. 检测 Antigravity 是否正在运行
+    let was_running = is_antigravity_running();
     
-    // 3. Wait for process to exit (max 5 seconds)
-    if !wait_for_antigravity_exit(5000) {
-        println!("Warning: Antigravity may still be running, attempting to delete DLL anyway");
+    // 3. 如果正在运行，先关闭
+    if was_running {
+        kill_antigravity()?;
+        println!("Antigravity killed");
+        
+        // Wait for process to exit (max 5 seconds)
+        if !wait_for_antigravity_exit(5000) {
+            println!("Warning: Antigravity may still be running, attempting to delete DLL anyway");
+        }
+    } else {
+        println!("Antigravity is not running, skipping kill step");
     }
     
     // 4. Remove version.dll with retry
@@ -212,16 +284,19 @@ pub fn disable_system_proxy(_app: &tauri::AppHandle) -> Result<String, String> {
         println!("DLL not found, skipping removal");
     }
     
-    // 5. Restart Antigravity
-    restart_antigravity(&antigravity_dir)?;
-    println!("Antigravity restarted");
-    
-    Ok("已禁用系统代理，Antigravity 已重启".to_string())
+    // 5. 如果之前在运行，重启
+    if was_running {
+        restart_antigravity(&antigravity_dir)?;
+        println!("Antigravity restarted");
+        Ok("已禁用系统代理，Antigravity 已重启".to_string())
+    } else {
+        Ok("已禁用系统代理。下次启动 Antigravity 时将自动生效。".to_string())
+    }
 }
 
 /// Check if system proxy is enabled
-pub fn is_proxy_enabled(_app: &tauri::AppHandle) -> Result<bool, String> {
-    let antigravity_dir = get_antigravity_dir()
+pub fn is_proxy_enabled(app: &tauri::AppHandle) -> Result<bool, String> {
+    let antigravity_dir = get_antigravity_dir(app)
         .ok_or("无法找到 Antigravity 安装目录")?;
     
     let dll_path = antigravity_dir.join("version.dll");

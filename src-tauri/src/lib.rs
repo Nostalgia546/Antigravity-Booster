@@ -123,33 +123,49 @@ fn switch_account(app: AppHandle, id: String) -> Result<String, String> {
     };
 
     // --- Phase 3: Process Management (Kill Antigravity) ---
-    // Scan for path first
-    let mut system = System::new_all();
-    system.refresh_all();
-    let self_pid = std::process::id();
-    let mut exe_path: Option<std::path::PathBuf> = None;
-
-    for (pid, process) in system.processes() {
-        let name = process.name().to_lowercase();
-        // Avoid killing ourselves (booster)
-        if name.contains("antigravity") && !name.contains("booster") && pid.as_u32() != self_pid {
-            // Try to capture exe path from running process
-            if exe_path.is_none() {
-                if let Some(p) = process.exe() {
-                    exe_path = Some(p.to_path_buf());
-                }
+    // 从配置获取 Antigravity 路径（如果之前运行过会被缓存）
+    let config = load_config(&app);
+    let antigravity_dir = config.antigravity_executable
+        .as_ref()
+        .map(|p| std::path::PathBuf::from(p));
+    
+    // 检测 Antigravity 是否正在运行
+    let was_running = {
+        let mut system = System::new_all();
+        system.refresh_all();
+        let mut running = false;
+        
+        for (_, process) in system.processes() {
+            let name = process.name().to_lowercase();
+            // 精确匹配 Antigravity.exe，避免匹配到 Booster 或其他相关进程
+            if name == "antigravity.exe" {
+                running = true;
+                println!("Detected Antigravity.exe is running");
+                break;
             }
         }
-    }
+        
+        if !running {
+            println!("Antigravity.exe is not running");
+        }
+        
+        running
+    };
 
-    #[cfg(target_os = "windows")]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        // Step A: Polite close
-        let _ = Command::new("taskkill").args(&["/IM", "Antigravity.exe"]).creation_flags(CREATE_NO_WINDOW).output();
-        std::thread::sleep(std::time::Duration::from_millis(1500));
-        // Step B: Ensure it's dead
-        let _ = Command::new("taskkill").args(&["/F", "/IM", "Antigravity.exe"]).creation_flags(CREATE_NO_WINDOW).output();
+    // 只在 Antigravity 运行时才关闭
+    if was_running {
+        #[cfg(target_os = "windows")]
+        {
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            // Step A: Polite close
+            let _ = Command::new("taskkill").args(&["/IM", "Antigravity.exe"]).creation_flags(CREATE_NO_WINDOW).output();
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            // Step B: Ensure it's dead
+            let _ = Command::new("taskkill").args(&["/F", "/IM", "Antigravity.exe"]).creation_flags(CREATE_NO_WINDOW).output();
+        }
+        println!("Antigravity was running, killed it");
+    } else {
+        println!("Antigravity is not running, skipping kill step");
     }
 
     // --- Phase 4: Database Injection ---
@@ -158,12 +174,10 @@ fn switch_account(app: AppHandle, id: String) -> Result<String, String> {
         target_dbs.push(home.join("AppData/Roaming/Antigravity/User/globalStorage/state.vscdb"));
         target_dbs.push(home.join("AppData/Roaming/com.antigravity.manager/storage.sqlite"));
     }
-    // Portable support
-    if let Some(ref p) = exe_path {
-        if let Some(parent) = p.parent() {
-            target_dbs.push(parent.join("data/user-data/User/globalStorage/state.vscdb"));
-            target_dbs.push(parent.join("data/storage.sqlite"));
-        }
+    // Portable support - 使用缓存的路径
+    if let Some(ref dir) = antigravity_dir {
+        target_dbs.push(dir.join("data/user-data/User/globalStorage/state.vscdb"));
+        target_dbs.push(dir.join("data/storage.sqlite"));
     }
 
     // Construct Protobuf Payload
@@ -236,19 +250,28 @@ fn switch_account(app: AppHandle, id: String) -> Result<String, String> {
         }
     }
 
-    // --- Phase 5: Restart ---
-    #[cfg(target_os = "windows")]
-    {
-        std::thread::sleep(std::time::Duration::from_millis(1000));
-        let restart_path = exe_path.or_else(|| {
-             dirs::data_local_dir().map(|d| d.join("Programs/Antigravity/Antigravity.exe"))
-        });
+    // --- Phase 5: Restart (only if it was running before) ---
+    if was_running {
+        #[cfg(target_os = "windows")]
+        {
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+            // 使用缓存的路径或常见路径
+            let restart_path = antigravity_dir
+                .as_ref()
+                .map(|d| d.join("Antigravity.exe"))
+                .or_else(|| {
+                    dirs::data_local_dir().map(|d| d.join("Programs/Antigravity/Antigravity.exe"))
+                });
 
-        if let Some(path) = restart_path {
-            if path.exists() {
-                let _ = open::that(&path);
+            if let Some(path) = restart_path {
+                if path.exists() {
+                    let _ = open::that(&path);
+                    println!("Antigravity restarted");
+                }
             }
         }
+    } else {
+        println!("Antigravity was not running, skipping restart");
     }
 
     Ok(format!("Switched ({} DBs synced)", success_count))
