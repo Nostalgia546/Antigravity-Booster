@@ -24,12 +24,12 @@ Antigravity Booster 是一款专门为 Antigravity 用户设计的辅助增强�
 ### 界面预览
 
 <p align="center">
-  <img width="100%" alt="仪表盘" src="https://github.com/user-attachments/assets/595d1727-7408-4143-ab63-163a00b844dd" />
+  <img width="100%" alt="仪表盘" src="https://github.com/user-attachments/assets/ff592399-5e4a-4707-8be4-039543469a71" />
 </p>
 
 <div style="display: flex; gap: 10px;">
-  <img width="100%" alt="账号管理" src="https://github.com/user-attachments/assets/b964ebc7-3f87-4738-aa45-2f886842cb2e" />
-  <img width="100%" alt="登录" src="https://github.com/user-attachments/assets/c631d494-2535-416f-871f-d948791dd583" />
+  <img width="100%" alt="账号管理" src="https://github.com/user-attachments/assets/542e5179-0e1a-4074-81cf-da8e0a07d88b" />
+  <img width="100%" alt="登录" src="https://github.com/user-attachments/assets/eabc4995-c42e-445b-b277-65502bd9ab88" />
 </div>
 
 ### 快速开始
