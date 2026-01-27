@@ -52,6 +52,50 @@ body {
     user-select: none;
 }
 
+/* 窗口控制按钮 - 悬浮在右上角 */
+.window-controls {
+    position: fixed;
+    top: 12px;
+    right: 12px;
+    display: flex;
+    gap: 8px;
+    z-index: 9999;
+}
+
+.window-button {
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all 0.2s ease;
+    outline: none;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    backdrop-filter: blur(10px);
+}
+
+.window-button:hover {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.window-button:active {
+    transform: translateY(0);
+}
+
+.window-close:hover {
+    background: #ef4444;
+    color: white;
+    border-color: #ef4444;
+}
+
 #app {
     display: flex;
     height: 100vh;
@@ -172,6 +216,8 @@ body {
 .content-body {
     flex: 1;
     padding: 2rem;
+    padding-top: 70px;
+    /* 为右上角的窗口控制按钮留出空间 */
     overflow-y: auto;
 }
 

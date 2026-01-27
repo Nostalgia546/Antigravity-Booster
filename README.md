@@ -36,7 +36,7 @@ Antigravity Booster 是一款专门为 Antigravity 用户设计的辅助增强�
 
 #### 下载安装
 
-您可以直接从 Releases 页面下载最新的 `.msi` 安装包进行安装。
+如果您使用的是Windows系统，您可以直接从 Releases 页面下载最新的 `.exe` 安装包进行安装。
 
 #### 基本使用
 

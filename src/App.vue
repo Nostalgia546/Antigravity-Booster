@@ -14,10 +14,15 @@ import {
   CheckCircle2,
   AlertCircle,
   Download,
-  Info
+  Info,
+  Minus,
+  Maximize2,
+  Minimize2,
+  X
 } from "lucide-vue-next";
 import { useAppStore } from "./stores/app";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 const store = useAppStore();
 const activeTab = ref('dashboard');
@@ -270,9 +275,55 @@ const refreshAllQuotas = async () => {
   store.addLog("批量刷新完成。");
   isRefreshingAll.value = false;
 };
+
+// 窗口控制
+const appWindow = getCurrentWindow();
+const isMaximized = ref(false);
+
+const minimizeWindow = async () => {
+  await appWindow.minimize();
+};
+
+const toggleMaximize = async () => {
+  if (isMaximized.value) {
+    await appWindow.unmaximize();
+  } else {
+    await appWindow.maximize();
+  }
+  // 更新状态
+  isMaximized.value = await appWindow.isMaximized();
+};
+
+const closeWindow = async () => {
+  await appWindow.close();
+};
+
+// 监听窗口最大化状态变化
+onMounted(async () => {
+  // 初始化状态
+  isMaximized.value = await appWindow.isMaximized();
+  
+  // 监听窗口大小变化
+  await appWindow.onResized(async () => {
+    isMaximized.value = await appWindow.isMaximized();
+  });
+});
 </script>
 
 <template>
+  <!-- 窗口控制按钮 - 悬浮在右上角 -->
+  <div class="window-controls">
+    <button class="window-button" @click="minimizeWindow" title="最小化">
+      <Minus :size="16" />
+    </button>
+    <button class="window-button" @click="toggleMaximize" :title="isMaximized ? '还原' : '最大化'">
+      <component :is="isMaximized ? Minimize2 : Maximize2" :size="16" />
+    </button>
+    <button class="window-button window-close" @click="closeWindow" title="关闭">
+      <X :size="16" />
+    </button>
+  </div>
+
   <!-- Sidebar -->
   <aside class="sidebar">
     <div class="brand">
