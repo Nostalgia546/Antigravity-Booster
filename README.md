@@ -52,8 +52,9 @@ Antigravity Booster 是一款专门为 Antigravity 用户设计的辅助增强�
 **如何绕过警告：**
 
 <p align="center">
-  <img width="500" alt="SmartScreen 警告" src="https://github.com/user-attachments/assets/your-screenshot-here" />
+  <img width="500" alt="SmartScreen 警告" src="https://github.com/user-attachments/assets/b35d847f-d550-4c44-b54d-35d14d8b76d3" />
 </p>
+
 
 1. 当出现蓝色警告窗口时，点击 **"更多信息"** 链接
 2. 会出现 **"仍要运行"** 按钮
