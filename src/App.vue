@@ -140,6 +140,36 @@ const formatBucketTooltip = (bucket: any) => {
   return `${timeRange}\n${usageInfo}`;
 };
 
+// 样式计算辅助函数
+const calculateBarHeight = (items: any[], maxUsage: number): string => {
+  const total = items.reduce((sum: number, item: any) => sum + item.usage, 0);
+  // Ensure maxUsage is at least 1 to avoid division by zero (though backend handles this)
+  const safeMax = Math.max(1, maxUsage); 
+  const px = (total / safeMax) * 160;
+  // Min 3px for visibility, Max 160px container height
+  return Math.min(160, Math.max(3, px)) + 'px';
+};
+
+const calculateBarGradient = (items: any[]): string => {
+  if (items.length === 0) return 'transparent';
+  if (items.length === 1) return items[0].color;
+  
+  const stops = items.map((item: any, i: number) => {
+    const prevHeight = items.slice(0, i).reduce((sum: number, it: any) => sum + it.usage, 0);
+    const currHeight = prevHeight + item.usage;
+    const totalHeight = items.reduce((sum: number, it: any) => sum + it.usage, 0);
+    
+    // Avoid division by zero
+    if (totalHeight === 0) return `${item.color} 0% 0%`;
+
+    const startPct = (prevHeight / totalHeight * 100).toFixed(1);
+    const endPct = (currHeight / totalHeight * 100).toFixed(1);
+    return `${item.color} ${startPct}% ${endPct}%`;
+  }).join(', ');
+
+  return `linear-gradient(to top, ${stops})`;
+};
+
 
 import { listen } from '@tauri-apps/api/event';
 
@@ -546,18 +576,9 @@ onMounted(async () => {
                   <div v-if="bucket.items.length > 0"
                        class="bar-animate"
                        :style="{
-                         height: Math.min(160, Math.max(3, (bucket.items.reduce((sum, item) => sum + item.usage, 0) / chartData.max_usage) * 160)) + 'px',
+                         height: calculateBarHeight(bucket.items, chartData.max_usage),
                          animationDelay: (idx * 0.01) + 's',
-                         background: bucket.items.length === 1 
-                           ? bucket.items[0].color 
-                           : `linear-gradient(to top, ${bucket.items.map((item, i) => {
-                               const prevHeight = bucket.items.slice(0, i).reduce((sum, it) => sum + it.usage, 0);
-                               const currHeight = prevHeight + item.usage;
-                               const totalHeight = bucket.items.reduce((sum, it) => sum + it.usage, 0);
-                               const startPct = (prevHeight / totalHeight * 100).toFixed(1);
-                               const endPct = (currHeight / totalHeight * 100).toFixed(1);
-                               return `${item.color} ${startPct}% ${endPct}%`;
-                             }).join(', ')})`,
+                         background: calculateBarGradient(bucket.items),
                          borderRadius: '2px 2px 0 0',
                          transition: 'height 0.3s',
                          cursor: 'pointer'
