@@ -795,13 +795,22 @@ async fn reconcile_active_session(app: AppHandle) -> Result<String, String> {
             }
             
             // 核心修复：如果识别到了是这个号，不管 is_active 有没有变，都把最新的 Token 同步过来
-            // 解决“编辑器自动刷新了 Token，但 Booster 还在用旧 Token 刷新导致数据不准”的问题
-            if should_be_active && !found_token.is_empty() && acc.token != found_token {
-                acc.token = found_token.clone();
-                if let Some(td) = &mut acc.token_data {
-                    td.access_token = found_token.clone();
+            // 解决"编辑器自动刷新了 Token，但 Booster 还在用旧 Token 刷新导致数据不准"的问题
+            if should_be_active && !found_token.is_empty() {
+                // 智能判断: 如果 acc.token 是 refresh token (1// 开头),不要覆盖它
+                // 只更新 token_data 中的 access_token
+                if !acc.token.starts_with("1//") && acc.token != found_token {
+                    // acc.token 是 access token,可以更新
+                    acc.token = found_token.clone();
+                    changed = true;
                 }
-                changed = true;
+                // 无论如何都更新 token_data 中的 access_token
+                if let Some(td) = &mut acc.token_data {
+                    if td.access_token != found_token {
+                        td.access_token = found_token.clone();
+                        changed = true;
+                    }
+                }
             }
         }
         status_msg = format!("同步成功: 已识别为账号 '{}' 并标记激活", name);
@@ -984,12 +993,24 @@ async fn import_account_from_antigravity(app: AppHandle) -> Result<Account, Stri
         None
     };
 
-    // 3. 逐个尝试验证，直到找到活的
+    // 3. 逐个尝试验证，优先测试 refresh token
     let mut verified_info = None;
     let mut working_token = String::new();
     let mut working_refresh_token = String::new();
 
+    // 分离 refresh token 和 access token
+    let mut refresh_tokens = Vec::new();
+    let mut access_tokens = Vec::new();
     for token in candidates {
+        if token.starts_with("1//") {
+            refresh_tokens.push(token);
+        } else {
+            access_tokens.push(token);
+        }
+    }
+
+    // 先测试所有 refresh token (优先使用长期有效的)
+    for token in refresh_tokens.iter().chain(access_tokens.iter()) {
         log_event(&app, &format!("[Import] Testing token prefix: {}...", &token[..10.min(token.len())]));
         
         // 判断是 refresh token 还是 access token
@@ -1017,7 +1038,7 @@ async fn import_account_from_antigravity(app: AppHandle) -> Result<Account, Stri
                 verified_info = Some(info);
                 working_token = access_token_to_test;
                 if is_refresh {
-                    working_refresh_token = token; // 保存原始的 refresh token
+                    working_refresh_token = token.clone(); // 保存原始的 refresh token
                 }
                 break; // 找到了活的，立即退出循环
             },
