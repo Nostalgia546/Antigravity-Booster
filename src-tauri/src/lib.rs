@@ -79,7 +79,7 @@ fn delete_account(app: AppHandle, id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn switch_account(app: AppHandle, id: String) -> Result<String, String> {
+async fn switch_account(app: AppHandle, id: String) -> Result<String, String> {
     use sysinfo::System;
 
     // --- Phase 1: Load & Validate ---
@@ -128,6 +128,41 @@ fn switch_account(app: AppHandle, id: String) -> Result<String, String> {
         let expiry = chrono::Utc::now().timestamp() + 3600; // Assume 1 hour validity
         (access.clone(), access, expiry)
     };
+
+    // --- 智能刷新机制: 如果 token 是 refresh token,先刷新获取新的 access token ---
+    let (final_access, final_refresh, final_expiry) = if final_access.starts_with("1//") {
+        // final_access 是 refresh token,需要先刷新
+        println!("[Switch] Detected refresh token as access token, refreshing...");
+        match oauth::refresh_access_token(&final_access, None).await {
+            Ok(new_access) => {
+                println!("[Switch] Successfully refreshed access token");
+                // 使用新的 access token,保持 refresh token 不变
+                (new_access, final_refresh, chrono::Utc::now().timestamp() + 3600)
+            },
+            Err(e) => {
+                println!("[Switch] Failed to refresh token: {}", e);
+                return Err(format!("Token 已过期且刷新失败: {}。请在 Antigravity Booster 中重新使用 OAuth 方式添加账号。", e));
+            }
+        }
+    } else if final_refresh.starts_with("1//") && final_refresh != final_access {
+        // final_refresh 是真正的 refresh token,final_access 可能过期了,尝试刷新
+        println!("[Switch] Access token may be expired, refreshing with refresh token...");
+        match oauth::refresh_access_token(&final_refresh, None).await {
+            Ok(new_access) => {
+                println!("[Switch] Successfully refreshed access token from refresh token");
+                (new_access, final_refresh, chrono::Utc::now().timestamp() + 3600)
+            },
+            Err(e) => {
+                // 刷新失败,但还是尝试用原来的 access token (可能还没过期)
+                println!("[Switch] Refresh failed, will try with existing access token: {}", e);
+                (final_access, final_refresh, final_expiry)
+            }
+        }
+    } else {
+        // access token 看起来是有效的,直接使用
+        (final_access, final_refresh, final_expiry)
+    };
+
 
     // --- Phase 3: Process Management (Kill Antigravity) ---
     // 从配置获取 Antigravity 路径（如果之前运行过会被缓存）
