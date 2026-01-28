@@ -1,13 +1,13 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
-    <CustomBuild Include="C:\我的\Project\Antigravity-Booster\version-dll\build\CMakeFiles\0d29ff9467e4b24fda7cb3d6c00ae6c0\generate.stamp.rule">
+    <CustomBuild Include="C:\我的\Project\Antigravity-Booster\Antigravity-Booster\version-dll\build\CMakeFiles\02a2534fcc9121e30a0d29f64d43160b\generate.stamp.rule">
       <Filter>CMake Rules</Filter>
     </CustomBuild>
   </ItemGroup>
   <ItemGroup>
     <Filter Include="CMake Rules">
-      <UniqueIdentifier>{1117330E-BEC1-33F1-9856-248187CD44F1}</UniqueIdentifier>
+      <UniqueIdentifier>{EE4065E9-3E1B-3AF9-925B-6BEB387013CC}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
 </Project>

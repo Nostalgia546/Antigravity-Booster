@@ -1,0 +1,59 @@
+{
+    "name": "antigravity-booster-helper",
+    "displayName": "Antigravity Booster Helper",
+    "description": "Companion extension for Antigravity Booster. Provides Auto-Accept and Quota Display.",
+    "version": "1.2.3",
+    "publisher": "Nostalgia546",
+    "icon": "icon.png",
+    "engines": {
+        "vscode": "^1.90.0"
+    },
+    "categories": [
+        "Other"
+    ],
+    "activationEvents": [
+        "onStartupFinished"
+    ],
+    "main": "./extension.js",
+    "contributes": {
+        "viewsContainers": {
+            "activitybar": [
+                {
+                    "id": "antigravity-booster-container",
+                    "title": "Antigravity Booster",
+                    "icon": "sidebar.svg"
+                }
+            ]
+        },
+        "views": {
+            "antigravity-booster-container": [
+                {
+                    "type": "webview",
+                    "id": "antigravityBoosterView",
+                    "name": "Status",
+                    "icon": "icon.png"
+                }
+            ]
+        },
+        "configuration": {
+            "title": "Antigravity Booster",
+            "properties": {
+                "antigravity.automation.autoAccept": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Automatically accept agent suggested edits and terminal commands."
+                }
+            }
+        },
+        "commands": [
+            {
+                "command": "antigravityBooster.toggleAutoAccept",
+                "title": "Toggle Auto-Accept"
+            },
+            {
+                "command": "antigravityBooster.showDetails",
+                "title": "Show Details"
+            }
+        ]
+    }
+}

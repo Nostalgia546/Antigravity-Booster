@@ -8,6 +8,7 @@ pub struct ModelQuota {
     pub name: String,
     pub percentage: f64,
     pub reset_time: String,
+    pub reset_at: Option<i64>, // 精确的重置 Unix 时间戳
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

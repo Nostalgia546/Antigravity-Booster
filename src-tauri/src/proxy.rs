@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 use sysinfo::System;
@@ -9,7 +8,7 @@ use std::os::windows::process::CommandExt;
 
 /// Get Antigravity installation directory with caching
 /// 优先使用配置中保存的路径，找到后自动保存
-fn get_antigravity_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
+pub fn get_antigravity_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
     // 1. 优先尝试从配置文件读取已保存的路径
     let config = crate::storage::load_config(app);
     if let Some(saved_path) = &config.antigravity_executable {
@@ -157,140 +156,179 @@ fn restart_antigravity(antigravity_dir: &PathBuf) -> Result<(), String> {
     }
 }
 
+// 定义当前 DLL 的预期版本号（每次更新 C++ 代码后应修改此值）
+// 定义当前 DLL 的预期版本号（每次更新 C++ 代码后应修改此值）
+const EXPECTED_DLL_VERSION: &str = "2026.01.28.02";
+
+/// 更新 Antigravity 目录下的 proxy_config.json
+fn update_proxy_json(antigravity_dir: &std::path::Path, config: &crate::storage::BoosterConfig, enabled: bool) -> Result<(), String> {
+    let json_path = antigravity_dir.join("proxy_config.json");
+    let json_content = serde_json::json!({
+        "version": EXPECTED_DLL_VERSION, // 写入版本号
+        "enabled": enabled,
+        "host": config.proxy_host,
+        "port": config.proxy_port,
+        "type": config.proxy_type,
+        "ipv6_mode": "block"
+    });
+    
+    std::fs::write(&json_path, serde_json::to_string_pretty(&json_content).unwrap())
+        .map_err(|e| format!("写入配置文件失败: {}", e))
+}
+
+/// 简单比对两个文件内容是否一致
+fn files_are_equal(a: &std::path::Path, b: &std::path::Path) -> bool {
+    let Ok(f1) = std::fs::read(a) else { return false };
+    let Ok(f2) = std::fs::read(b) else { return false };
+    f1 == f2
+}
+
 /// Enable system proxy for Antigravity
 pub fn enable_system_proxy(app: &tauri::AppHandle) -> Result<String, String> {
     // 1. Find Antigravity directory
     let antigravity_dir = get_antigravity_dir(app)
-        .ok_or("无法找到 Antigravity 安装目录。请确保 Antigravity 已安装或至少运行过一次。".to_string())?;
+        .ok_or("无法找到 Antigravity 安装目录。".to_string())?;
     
-    println!("Found Antigravity directory: {:?}", antigravity_dir);
-    
-    // 2. Get version.dll from Booster resources
-    // Try multiple possible paths (dev mode vs release mode)
+    let config = crate::storage::load_config(app);
+    let dll_path = antigravity_dir.join("version.dll");
+    let was_running = is_antigravity_running();
+
+    // 2. 这里的关键：找到资源里的最新 DLL
     let possible_paths = vec![
         app.path().resource_dir().ok().map(|p| p.join("version.dll")),
-        Some(PathBuf::from("src-tauri/resources/version.dll")),
-        Some(PathBuf::from("src-tauri/target/debug/resources/version.dll")),
-        Some(PathBuf::from("resources/version.dll")),
+        Some(std::path::PathBuf::from("src-tauri/resources/version.dll")),
+        Some(std::path::PathBuf::from("resources/version.dll")),
     ];
     
     let mut resource_path = None;
     for path_opt in possible_paths {
         if let Some(path) = path_opt {
-            println!("Trying resource path: {:?}", path);
             if path.exists() {
-                println!("Found DLL at: {:?}", path);
                 resource_path = Some(path);
                 break;
             }
         }
     }
-    
-    let resource_path = resource_path.ok_or_else(|| {
-        "version.dll 资源文件不存在。请确保已编译 DLL 并运行 update-dll.bat".to_string()
-    })?;
-    
-    // 3. 检测 Antigravity 是否正在运行
-    let was_running = is_antigravity_running();
-    
-    // 4. 如果正在运行，先关闭
-    if was_running {
-        kill_antigravity()?;
-        println!("Antigravity killed");
-        
-        // Wait for process to exit (max 5 seconds)
-        if !wait_for_antigravity_exit(5000) {
-            println!("Warning: Antigravity may still be running");
+    let resource_path = resource_path.ok_or("找不到 version.dll 资源文件。")?;
+
+    // 3. 校验 DLL 是否需要更新 (不存在，或者内容不一致)
+    let needs_dll_update = !dll_path.exists() || !files_are_equal(&dll_path, &resource_path);
+
+    if needs_dll_update {
+        // 如果正在运行且需要更新核心 DLL，必须重启
+        if was_running {
+            kill_antigravity()?;
+            wait_for_antigravity_exit(5000);
         }
-    } else {
-        println!("Antigravity is not running, skipping kill step");
+        
+        std::fs::copy(&resource_path, &dll_path)
+            .map_err(|e| format!("更新 version.dll 核心失败: {}", e))?;
     }
-    
-    // 5. Copy version.dll to Antigravity directory
-    let target_path = antigravity_dir.join("version.dll");
-    println!("Target DLL path: {:?}", target_path);
-    
-    fs::copy(&resource_path, &target_path)
-        .map_err(|e| format!("复制 version.dll 失败: {}。请确保有管理员权限。", e))?;
-    
-    println!("DLL copied successfully");
-    
-    // 6. 如果之前在运行，重启
-    if was_running {
+
+    // 4. 更新 JSON 配置文件 (无论是否更新了 DLL)
+    update_proxy_json(&antigravity_dir, &config, true)?;
+
+    // 5. 判断反馈信息
+    if was_running && needs_dll_update {
         restart_antigravity(&antigravity_dir)?;
-        println!("Antigravity restarted");
-        Ok("已启用系统代理，Antigravity 已重启".to_string())
+        Ok("核心组件已升级，Antigravity 已重启以启用最新功能".to_string())
+    } else if was_running {
+        Ok("已实时开启代理，无需重启".to_string())
     } else {
-        Ok("已启用系统代理。下次启动 Antigravity 时将自动生效。".to_string())
+        Ok("代理配置已就绪，下次启动将自动生效".to_string())
+    }
+}
+
+/// 启动时的兼容性检查：确保 DLL 是最新的，且配置一致
+/// 这是为了解决老版本用户升级上来的兼容性问题
+pub fn ensure_dll_compatibility(app: &tauri::AppHandle) {
+    let Some(antigravity_dir) = get_antigravity_dir(app) else { return };
+    let dll_path = antigravity_dir.join("version.dll");
+    let json_path = antigravity_dir.join("proxy_config.json");
+
+    // 0. 快速检查：如果版本号匹配，直接跳过 (解决重复重启问题)
+    if dll_path.exists() && json_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&json_path) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(v) = json.get("version").and_then(|s| s.as_str()) {
+                    if v == EXPECTED_DLL_VERSION {
+                         // 版本一致，无需任何操作！完美！
+                         return;
+                    }
+                }
+            }
+        }
+    }
+
+    if !dll_path.exists() { return; }
+
+    // 1. 查找资源里的最新 DLL
+    let possible_paths = vec![
+        app.path().resource_dir().ok().map(|p| p.join("version.dll")),
+        Some(std::path::PathBuf::from("src-tauri/resources/version.dll")),
+        Some(std::path::PathBuf::from("resources/version.dll")),
+    ];
+    
+    let mut resource_path = None;
+    for path_opt in possible_paths {
+        if let Some(path) = path_opt {
+            if path.exists() {
+                resource_path = Some(path);
+                break;
+            }
+        }
+    }
+    let Some(resource_path) = resource_path else { return };
+
+    // 2. 如果内容不一致，说明是旧版 DLL
+    if !files_are_equal(&dll_path, &resource_path) {
+        println!("Detected old version.dll, performing robust upgrade...");
+        let was_running = is_antigravity_running();
+        
+        if was_running {
+            // 强力关闭并等待更久一点
+            let _ = kill_antigravity();
+            wait_for_antigravity_exit(5000); 
+        }
+        
+        // 3. 循环重试复制（解决 Windows 文件锁定带来的延时）
+        let mut success = false;
+        for i in 0..5 {
+            if std::fs::copy(&resource_path, &dll_path).is_ok() {
+                success = true;
+                break;
+            }
+            println!("DLL copy attempt {} failed, retrying...", i + 1);
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+        }
+
+        if success {
+            let config = crate::storage::load_config(app);
+            let _ = update_proxy_json(&antigravity_dir, &config, true);
+        }
+        
+        // 4. 关键：只要刚才在运行，现在就必须重启
+        if was_running {
+            let _ = restart_antigravity(&antigravity_dir);
+        }
     }
 }
 
 /// Disable system proxy for Antigravity
 pub fn disable_system_proxy(app: &tauri::AppHandle) -> Result<String, String> {
-    // 1. Find Antigravity directory
     let antigravity_dir = get_antigravity_dir(app)
-        .ok_or("无法找到 Antigravity 安装目录。请确保 Antigravity 已安装或至少运行过一次。".to_string())?;
+        .ok_or("无法找到 Antigravity 安装目录。".to_string())?;
     
-    println!("Found Antigravity directory: {:?}", antigravity_dir);
-    
-    // 2. 检测 Antigravity 是否正在运行
+    let config = crate::storage::load_config(app);
     let was_running = is_antigravity_running();
+
+    // 只更新配置文件，不删除 DLL，不重启
+    update_proxy_json(&antigravity_dir, &config, false)?;
     
-    // 3. 如果正在运行，先关闭
     if was_running {
-        kill_antigravity()?;
-        println!("Antigravity killed");
-        
-        // Wait for process to exit (max 5 seconds)
-        if !wait_for_antigravity_exit(5000) {
-            println!("Warning: Antigravity may still be running, attempting to delete DLL anyway");
-        }
+        Ok("已实时禁用代理，无需重启".to_string())
     } else {
-        println!("Antigravity is not running, skipping kill step");
-    }
-    
-    // 4. Remove version.dll with retry
-    let dll_path = antigravity_dir.join("version.dll");
-    println!("DLL path to remove: {:?}", dll_path);
-    
-    if dll_path.exists() {
-        // Try up to 3 times
-        let mut attempts = 0;
-        let mut last_error = None;
-        
-        while attempts < 3 {
-            match fs::remove_file(&dll_path) {
-                Ok(_) => {
-                    println!("DLL removed successfully on attempt {}", attempts + 1);
-                    break;
-                }
-                Err(e) => {
-                    last_error = Some(e);
-                    attempts += 1;
-                    if attempts < 3 {
-                        println!("Failed to remove DLL (attempt {}), retrying...", attempts);
-                        std::thread::sleep(std::time::Duration::from_millis(1000));
-                    }
-                }
-            }
-        }
-        
-        if let Some(e) = last_error {
-            if attempts >= 3 {
-                return Err(format!("删除 version.dll 失败（已重试 3 次）: {}。DLL 可能仍被占用，请手动删除。", e));
-            }
-        }
-    } else {
-        println!("DLL not found, skipping removal");
-    }
-    
-    // 5. 如果之前在运行，重启
-    if was_running {
-        restart_antigravity(&antigravity_dir)?;
-        println!("Antigravity restarted");
-        Ok("已禁用系统代理，Antigravity 已重启".to_string())
-    } else {
-        Ok("已禁用系统代理。下次启动 Antigravity 时将自动生效。".to_string())
+        Ok("已禁用代理配置".to_string())
     }
 }
 
@@ -300,5 +338,22 @@ pub fn is_proxy_enabled(app: &tauri::AppHandle) -> Result<bool, String> {
         .ok_or("无法找到 Antigravity 安装目录")?;
     
     let dll_path = antigravity_dir.join("version.dll");
-    Ok(dll_path.exists())
+    let json_path = antigravity_dir.join("proxy_config.json");
+
+    // 1. 如果 DLL 不存在，那肯定没开
+    if !dll_path.exists() {
+        return Ok(false);
+    }
+
+    // 2. 如果 DLL 存在，优先看 JSON 配置
+    if let Ok(content) = std::fs::read_to_string(&json_path) {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(enabled) = json.get("enabled").and_then(|v| v.as_bool()) {
+                return Ok(enabled);
+            }
+        }
+    }
+
+    // 3. 如果 JSON 也没说清楚，默认 DLL 存在就是开启 (兼容旧行为)
+    Ok(true)
 }

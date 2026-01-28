@@ -1,5 +1,5 @@
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 use crate::storage::{QuotaData, ModelQuota};
 
@@ -34,11 +34,11 @@ struct ModelInfo {
 }
 
 #[derive(Debug, Deserialize)]
-struct QuotaInfo {
+pub struct QuotaInfo {
     #[serde(rename = "remainingFraction")]
-    remaining_fraction: Option<f64>,
+    pub remaining_fraction: Option<f64>,
     #[serde(rename = "resetTime")]
-    reset_time: Option<String>,
+    pub reset_time: Option<String>,
 }
 
 pub async fn fetch_account_quota_real(access_token: &str, _email: &str, proxy_url: Option<String>) -> Result<(QuotaData, String, String), String> {
@@ -138,27 +138,29 @@ pub async fn fetch_account_quota_real(access_token: &str, _email: &str, proxy_ur
                 (q.remaining_fraction.map(|f| (f * 100.0) as f64).unwrap_or(0.0), q.reset_time)
             } else { (0.0, None) };
             
-            let formatted_time = if let Some(t_str) = raw_time {
+            let (formatted_time, reset_at) = if let Some(t_str) = raw_time {
                 if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&t_str) {
                     let now = chrono::Utc::now();
                     let diff = dt.with_timezone(&chrono::Utc).signed_duration_since(now);
                     let local_dt = dt.with_timezone(&chrono::Local);
-                    let time_str = local_dt.format("%Y-%m-%d %H:%M").to_string();
+                    let _time_str = local_dt.format("%Y-%m-%d %H:%M").to_string();
+                    let ts = dt.timestamp();
 
                     if diff.num_seconds() > 0 {
                         let hours = diff.num_hours();
                         let mins = diff.num_minutes() % 60;
-                        format!("{} (剩余 {}小时 {}分)", time_str, hours, mins)
+                        (format!("{}小时 {}分", hours, mins), Some(ts))
                     } else {
-                         format!("{} (已重置)", time_str)
+                         ("已重置".to_string(), Some(ts))
                     }
-                } else { t_str }
-            } else { "每日重置".to_string() };
+                } else { (t_str, None) }
+            } else { ("每日重置".to_string(), None) };
 
             models.push(ModelQuota {
                 name: display_name.to_string(),
                 percentage: pct,
                 reset_time: formatted_time,
+                reset_at,
             });
         }
 

@@ -2,10 +2,10 @@
 <Project>
   <ProjectOutputs>
     <ProjectOutput>
-      <FullPath>C:\我的\Project\Antigravity-Booster\version-dll\build\x64\Release\ZERO_CHECK</FullPath>
+      <FullPath>C:\我的\Project\Antigravity-Booster\Antigravity-Booster\version-dll\build\x64\Release\ZERO_CHECK</FullPath>
     </ProjectOutput>
     <ProjectOutput>
-      <FullPath>C:\我的\Project\Antigravity-Booster\version-dll\build\Release\version.dll</FullPath>
+      <FullPath>C:\我的\Project\Antigravity-Booster\Antigravity-Booster\version-dll\build\Release\version.dll</FullPath>
     </ProjectOutput>
   </ProjectOutputs>
   <ContentFiles />

@@ -1,3 +1,3 @@
-C:/我的/Project/Antigravity-Booster/version-dll/build/CMakeFiles/version.dir
-C:/我的/Project/Antigravity-Booster/version-dll/build/CMakeFiles/ALL_BUILD.dir
-C:/我的/Project/Antigravity-Booster/version-dll/build/CMakeFiles/ZERO_CHECK.dir
+C:/我的/Project/Antigravity-Booster/Antigravity-Booster/version-dll/build/CMakeFiles/version.dir
+C:/我的/Project/Antigravity-Booster/Antigravity-Booster/version-dll/build/CMakeFiles/ALL_BUILD.dir
+C:/我的/Project/Antigravity-Booster/Antigravity-Booster/version-dll/build/CMakeFiles/ZERO_CHECK.dir

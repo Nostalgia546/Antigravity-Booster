@@ -1,15 +1,20 @@
 mod storage;
-mod migration;
 mod oauth;
 mod history;
 mod proxy;
+mod quota;
 
 use std::fs;
+use std::process::Command;
+use std::os::windows::process::CommandExt;
 use tauri::{AppHandle, Emitter, Manager, menu::{Menu, MenuItem}, tray::{TrayIconBuilder, TrayIconEvent}};
-use crate::storage::{Account, BoosterConfig, load_accounts, save_accounts, get_app_dir, load_config, save_config};
+use crate::storage::{Account, load_accounts, save_accounts, load_config, TokenData, BoosterConfig, save_config, get_app_dir};
+use crate::oauth::export_backup;
+use crate::proxy::get_antigravity_dir;
+use base64::{Engine as _, engine::general_purpose};
 
 #[tauri::command]
-fn get_accounts(app: AppHandle) -> Vec<Account> {
+fn sync_vault_entries(app: AppHandle) -> Vec<Account> {
     let mut accounts = load_accounts(&app);
     
     // Sanitize/Map data strictly for display
@@ -75,11 +80,7 @@ fn delete_account(app: AppHandle, id: String) -> Result<(), String> {
 
 #[tauri::command]
 fn switch_account(app: AppHandle, id: String) -> Result<String, String> {
-    use sysinfo::{Pid, System};
-    use std::process::Command;
-    use std::os::windows::process::CommandExt;
-    use base64::{Engine as _, engine::general_purpose};
-    use crate::storage::TokenData;
+    use sysinfo::System;
 
     // --- Phase 1: Load & Validate ---
     let mut accounts = load_accounts(&app);
@@ -157,96 +158,72 @@ fn switch_account(app: AppHandle, id: String) -> Result<String, String> {
         #[cfg(target_os = "windows")]
         {
             const CREATE_NO_WINDOW: u32 = 0x08000000;
-            // Step A: Polite close
+            // 尝试优雅关闭
             let _ = Command::new("taskkill").args(&["/IM", "Antigravity.exe"]).creation_flags(CREATE_NO_WINDOW).output();
-            std::thread::sleep(std::time::Duration::from_millis(1500));
-            // Step B: Ensure it's dead
+            std::thread::sleep(std::time::Duration::from_millis(500)); // 缩短等待时间
+            // 确保进程已退出
             let _ = Command::new("taskkill").args(&["/F", "/IM", "Antigravity.exe"]).creation_flags(CREATE_NO_WINDOW).output();
         }
-        println!("Antigravity was running, killed it");
+        println!("Antigravity was running, triggered fast restart");
     } else {
         println!("Antigravity is not running, skipping kill step");
     }
-
     // --- Phase 4: Database Injection ---
     let mut target_dbs = Vec::new();
     if let Some(home) = dirs::home_dir() {
         target_dbs.push(home.join("AppData/Roaming/Antigravity/User/globalStorage/state.vscdb"));
-        target_dbs.push(home.join("AppData/Roaming/com.antigravity.manager/storage.sqlite"));
     }
     // Portable support - 使用缓存的路径
     if let Some(ref dir) = antigravity_dir {
         target_dbs.push(dir.join("data/user-data/User/globalStorage/state.vscdb"));
-        target_dbs.push(dir.join("data/storage.sqlite"));
     }
 
-    // Construct Protobuf Payload
-    fn make_varint(mut v: u64) -> Vec<u8> {
+    // Inject
+    let mut success_count = 0;
+    
+    // --- 构造通用 V2 数据包 (纯净实现) ---
+    fn to_varint(mut v: u64) -> Vec<u8> {
         let mut b = Vec::new();
         while v >= 0x80 { b.push((v & 0x7F | 0x80) as u8); v >>= 7; }
         b.push(v as u8);
         b
     }
-
-    let mut oauth_block = Vec::new();
-    // Field 1: Access Token
-    oauth_block.extend(make_varint((1 << 3) | 2));
-    oauth_block.extend(make_varint(final_access.len() as u64));
-    oauth_block.extend(final_access.as_bytes());
-    // Field 2: Bearer
-    oauth_block.extend(make_varint((2 << 3) | 2));
-    oauth_block.extend(make_varint(6));
-    oauth_block.extend(b"Bearer");
-    // Field 3: Refresh Token
-    oauth_block.extend(make_varint((3 << 3) | 2));
-    oauth_block.extend(make_varint(final_refresh.len() as u64));
-    oauth_block.extend(final_refresh.as_bytes());
-    // Field 4: Expiry
-    let mut timestamp_msg = Vec::new();
-    timestamp_msg.extend(make_varint((1 << 3) | 0));
-    timestamp_msg.extend(make_varint(final_expiry as u64));
-    oauth_block.extend(make_varint((4 << 3) | 2));
-    oauth_block.extend(make_varint(timestamp_msg.len() as u64));
-    oauth_block.extend(timestamp_msg);
-
-    // Final Wrap
-    let mut final_payload = Vec::new();
-    final_payload.extend(make_varint((6 << 3) | 2));
-    final_payload.extend(make_varint(oauth_block.len() as u64));
-    final_payload.extend(oauth_block);
-
-    // Inject
-    let mut success_count = 0;
-    let mut log_msgs = Vec::new();
+    let mut inner = Vec::new();
+    // AccessToken (Field 1)
+    inner.extend(to_varint((1 << 3) | 2));
+    inner.extend(to_varint(final_access.len() as u64));
+    inner.extend(final_access.as_bytes());
+    // RefreshToken (Field 3)
+    inner.extend(to_varint((3 << 3) | 2));
+    inner.extend(to_varint(final_refresh.len() as u64));
+    inner.extend(final_refresh.as_bytes());
+    // Expiry (Field 4 -> 1)
+    let mut ts = Vec::new();
+    ts.extend(to_varint((1 << 3) | 0));
+    ts.extend(to_varint(final_expiry as u64));
+    inner.extend(to_varint((4 << 3) | 2));
+    inner.extend(to_varint(ts.len() as u64));
+    inner.extend(ts);
+    
+    let mut payload = Vec::new();
+    payload.extend(to_varint((6 << 3) | 2));
+    payload.extend(to_varint(inner.len() as u64));
+    payload.extend(inner);
+    let v2_b64 = general_purpose::STANDARD.encode(&payload);
 
     for db in target_dbs {
         if !db.exists() { continue; }
         if let Ok(conn) = rusqlite::Connection::open(&db) {
             let _ = conn.execute("PRAGMA busy_timeout = 3000;", []);
             
-            // 1. Clean bad data
-            let _ = conn.execute("DELETE FROM ItemTable WHERE key = 'jetskiStateSync.agentManagerInitState'", []);
-            
-            // 2. Insert New Protobuf (Base64)
-            let encoded = general_purpose::STANDARD.encode(&final_payload);
-            let res_v2 = conn.execute(
-                "INSERT INTO ItemTable (key, value) VALUES ('jetskiStateSync.agentManagerInitState', ?1)",
-                [&encoded],
-            );
-
-            // 3. Insert Onboarding Flag
+            // 1. 注入到深度状态键位 (遵循 Manager/Agent 结构协议)
+            let _ = conn.execute("INSERT OR REPLACE INTO ItemTable (key, value) VALUES ('jetskiStateSync.agentManagerInitState', ?1)", [&v2_b64]);
+            // 2. 注入到全局用户键位 (确保基础编辑器身份识别)
+            let _ = conn.execute("INSERT OR REPLACE INTO ItemTable (key, value) VALUES ('current_user', ?1)", [&final_access]);
+            // 3. 注入引导状态标志 (确保跳过登录后的引导弹窗)
             let _ = conn.execute("INSERT OR REPLACE INTO ItemTable (key, value) VALUES ('antigravityOnboarding', 'true')", []);
 
-            // 4. Legacy Support (using same final_access)
-            let res_v1 = conn.execute(
-                "INSERT OR REPLACE INTO ItemTable (key, value) VALUES ('current_user', ?1)",
-                [&final_access],
-            );
-
-            if res_v2.is_ok() || res_v1.is_ok() {
-                success_count += 1;
-                log_msgs.push(format!("Updated {:?}", db.file_name().unwrap()));
-            }
+            success_count += 1;
         }
     }
 
@@ -254,7 +231,7 @@ fn switch_account(app: AppHandle, id: String) -> Result<String, String> {
     if was_running {
         #[cfg(target_os = "windows")]
         {
-            std::thread::sleep(std::time::Duration::from_millis(1000));
+            std::thread::sleep(std::time::Duration::from_millis(100)); // 只有 0.1 秒的间隙
             // 使用缓存的路径或常见路径
             let restart_path = antigravity_dir
                 .as_ref()
@@ -271,35 +248,37 @@ fn switch_account(app: AppHandle, id: String) -> Result<String, String> {
             }
         }
     } else {
-        println!("Antigravity was not running, skipping restart");
+        println!("Antigravity is not running, skipping restart");
     }
 
     Ok(format!("Switched ({} DBs synced)", success_count))
 }
 
 #[tauri::command]
-fn get_config(app: AppHandle) -> BoosterConfig {
+fn load_booster_settings(app: AppHandle) -> BoosterConfig {
     load_config(&app)
 }
 
 #[tauri::command]
-fn set_config(app: AppHandle, config: BoosterConfig) -> Result<(), String> {
+fn update_booster_settings(app: AppHandle, config: BoosterConfig) -> Result<(), String> {
     save_config(&app, &config).map_err(|e| e.to_string())
 }
 
-mod quota;
-
 #[tauri::command]
-async fn fetch_account_quota(app: AppHandle, id: String) -> Result<storage::QuotaData, String> {
+async fn pulse_check_quota(app: AppHandle, id: String) -> Result<storage::QuotaData, String> {
+    // 1. Load accounts
     let mut accounts = load_accounts(&app);
-    // User requested to use system proxy directly, so we pass None.
-    // reqwest Client uses system proxy by default if not overridden.
     let proxy_url = None;
 
-    if let Some(acc) = accounts.iter_mut().find(|a| a.id == id) {
-        // Decide if we need to refresh
-        let access_token = if acc.token.starts_with("1//") {
-            // It's a refresh token, get a fresh access token
+    // 2. Find index to avoid long-lived mutable borrow
+    let acc_idx = accounts.iter().position(|a| a.id == id)
+        .ok_or_else(|| "Account not found".to_string())?;
+
+    // 3. Prepare data needed for fetch (Clone small strings)
+    let (access_token, email, _current_token) = {
+        let acc = &accounts[acc_idx];
+        let token_to_use = if acc.token.starts_with("1//") {
+            // Need refresh
             match oauth::refresh_access_token(&acc.token, proxy_url.clone()).await {
                 Ok(at) => at,
                 Err(e) => return Err(format!("Quota error: Token refresh failed: {}", e)),
@@ -307,27 +286,185 @@ async fn fetch_account_quota(app: AppHandle, id: String) -> Result<storage::Quot
         } else {
             acc.token.clone()
         };
+        (token_to_use, acc.email.clone(), acc.token.clone())
+    };
 
-        // Use real fetcher with proxy
-        let (new_quota, detected_tier, debug_logs) = quota::fetch_account_quota_real(&access_token, &acc.email, proxy_url).await?;
-        
-        // Emit debug logs to frontend
-        let _ = app.emit("debug-log", debug_logs);
+    // 4. Update the token in memory if it was refreshed? 
+    // The oauth::refresh_access_token returns a NEW access token, 
+    // but typically we don't save ephemeral access tokens back to disk unless they are permanent.
+    // For now we just use it.
 
+    // 5. Fetch Quota (Async, no borrow held)
+    let (new_quota, detected_tier, debug_logs) = quota::fetch_account_quota_real(&access_token, &email, proxy_url).await?;
+    
+    let _ = app.emit("debug-log", debug_logs);
+
+    // 6. Mutate Accounts
+    {
+        let acc = &mut accounts[acc_idx];
         acc.quota = Some(new_quota.clone());
-        // Update tier if valid
         if !detected_tier.is_empty() {
              acc.account_type = detected_tier;
         } else {
              acc.account_type = "Gemini".to_string();
         }
-
-        save_accounts(&app, &accounts).map_err(|e| e.to_string())?;
-        let _ = crate::history::record_quota_point(&app);
-        Ok(new_quota)
-    } else {
-        Err("Account not found".to_string())
     }
+
+    // 7. Save to Disk (Now mutable borrow is gone)
+    save_accounts(&app, &accounts).map_err(|e| e.to_string())?;
+
+    // 8. Bridge Write
+    if accounts[acc_idx].is_active {
+        write_quota_bridge_file(&app, &new_quota);
+    }
+
+    let _ = crate::history::record_quota_point(&app);
+    Ok(new_quota)
+}
+
+// 辅助函数：将中文小时数转换为 "x天x小时"
+fn prettify_duration(raw: &str) -> String {
+    let re = regex::Regex::new(r"(\d+)\s*小时").unwrap();
+    if let Some(caps) = re.captures(raw) {
+        if let Ok(hours) = caps[1].parse::<i32>() {
+            if hours >= 24 {
+                let days = hours / 24;
+                let rem = hours % 24;
+                let replace_str = if rem > 0 {
+                    format!("{}天{}小时", days, rem)
+                } else {
+                    format!("{}天", days)
+                };
+                return re.replace(raw, replace_str).to_string();
+            }
+        }
+    }
+    raw.to_string()
+}
+
+// 写入桥接文件供插件读取
+fn write_quota_bridge_file(app: &AppHandle, quota: &crate::storage::QuotaData) {
+    let bridge_dir = get_app_dir(app); 
+    let _ = std::fs::create_dir_all(&bridge_dir);
+    let path = bridge_dir.join("quota_bridge.json");
+    
+    // 1. Generate Short Text for Status Bar (e.g. "Pro: 90% | Flash: 100%")
+    let mut short_parts = Vec::new();
+    // 2. Generate Tooltip (Markdown Table)
+    let mut tooltip_lines = Vec::new();
+    
+    tooltip_lines.push("| Model | Usage | Reset |".to_string());
+    tooltip_lines.push("|---|---|---|".to_string());
+
+    for m in &quota.models {
+        // Short Name mapping
+        let s_name = if m.name.to_lowercase().contains("pro") { "Pro" }
+        else if m.name.to_lowercase().contains("flash") { "Flash" }
+        else if m.name.to_lowercase().contains("claude") { "Claude" }
+        else { &m.name };
+        
+        let percent = m.percentage;
+        short_parts.push(format!("{}: {:.0}%", s_name, percent));
+        
+        // Tooltip Row
+        let reset_pretty = prettify_duration(&m.reset_time);
+        tooltip_lines.push(format!("| {} | {:.1}% | {} |", m.name, percent, reset_pretty));
+    }
+
+    let short_text = if short_parts.is_empty() {
+        "No Quota Data".to_string()
+    } else {
+        short_parts.join("  ") // Use double space for separation
+    };
+
+    let tooltip_text = tooltip_lines.join("\n");
+    
+    let json_content = serde_json::json!({
+        "status_text": short_text,
+        "tooltip": tooltip_text,
+        "models": quota.models, // Pass raw data for TreeView customization
+        "update_time": chrono::Local::now().to_rfc3339()
+    });
+    
+    let _ = std::fs::write(path, serde_json::to_string(&json_content).unwrap_or_default());
+}
+
+#[tauri::command]
+async fn install_assistant_extension(app: AppHandle) -> Result<String, String> {
+    println!("[Extension] Starting installation...");
+    
+    // 1. 确定 VSIX 源文件路径 (我们在 resources 目录里)
+    let resource_path = app.path().resource_dir().map_err(|e| e.to_string())?
+        .join("antigravity-booster-helper.vsix");
+        
+    // 开发环境下可能还没有打包进去，这里做一个 fallback (假设在源码根目录)
+    let vsix_path = if resource_path.exists() {
+        println!("[Extension] Found VSIX in resources: {:?}", resource_path);
+        resource_path
+    } else {
+        println!("[Extension] VSIX not in resources, checking dev paths...");
+        // Fallback for dev environment: try to build it on the fly or look in root
+        let root_vsix = std::path::PathBuf::from("antigravity-booster-helper.vsix");
+        if root_vsix.exists() {
+             println!("[Extension] Found VSIX in root: {:?}", root_vsix);
+             root_vsix
+        } else {
+            // Last resort: try one level up in src-tauri/resources
+            let up_vsix = std::path::PathBuf::from("resources/antigravity-booster-helper.vsix");
+            if up_vsix.exists() {
+                println!("[Extension] Found VSIX in src-tauri/resources: {:?}", up_vsix);
+                up_vsix
+            } else {
+                return Err("找不到插件安装包 (vsix)。请确保已执行打包流程。".to_string());
+            }
+        }
+    };
+
+    // 2. 找到 Antigravity CLI
+    let ag_dir = get_antigravity_dir(&app).ok_or("未找到 Antigravity 安装目录")?;
+    println!("[Extension] Antigravity dir: {:?}", ag_dir);
+    
+    // 注意：Antigravity 的 CLI 通常在 bin 目录下
+    let cli_path = ag_dir.join("bin").join("antigravity.cmd"); 
+    
+    let final_cli = if cli_path.exists() {
+        println!("[Extension] Using CLI: {:?}", cli_path);
+        cli_path 
+    } else {
+        // 尝试 resources/app/out/cli.js (需要 node 运行)? 
+        // 或者直接调用主程序带参数
+        let exe_path = ag_dir.join("Antigravity.exe");
+        println!("[Extension] CLI not found, trying EXE: {:?}", exe_path);
+        exe_path 
+    };
+
+    // 3. 执行安装命令
+    println!("[Extension] Executing command...");
+    // Antigravity.exe --install-extension <path>
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        
+        let output = std::process::Command::new(&final_cli)
+            .arg("--install-extension")
+            .arg(&vsix_path) // Borrow path
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map_err(|e| format!("执行安装命令失败: {}", e))?;
+            
+        println!("[Extension] Command output: {:?}", output);
+        
+        if !output.status.success() {
+            let err = String::from_utf8_lossy(&output.stderr);
+            // Try visible window if hidden failed?
+            println!("[Extension] Installation failed (Hidden). Error: {}", err);
+            
+            return Err(format!("安装失败: {}", err));
+        }
+    }
+
+    Ok("插件已成功安装，请重启编辑器生效。".to_string())
 }
 
 #[tauri::command]
@@ -346,8 +483,128 @@ async fn stop_boosting() -> Result<(), String> {
     Ok(())
 }
 
+// --- Extension Manager ---
+
+const LATEST_HELPER_VERSION: &str = "1.2.3";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ExtensionStatus {
+    installed_version: Option<String>,
+    latest_version: String,
+    status: String, // "not_installed", "outdated", "installed"
+}
+
 #[tauri::command]
-fn detect_system_proxy() -> String {
+fn get_extension_status(_app: AppHandle) -> ExtensionStatus {
+    let home = dirs::home_dir();
+    let mut installed_ver = None;
+    
+    // 尝试寻找插件安装目录
+    // 默认 Antigravity 这里的命名可能是 .antigravity
+    if let Some(h) = home {
+        // 常见路径探测
+        let check_paths = vec![
+            h.join(".antigravity/extensions"),
+            h.join(".vscode/extensions"), // 兼容
+        ];
+        
+        for base_dir in check_paths {
+            if !base_dir.exists() { continue; }
+            
+            // 查找名为 nostalgia546.antigravity-booster-helper-* 的文件夹
+            // 因为 VS Code 插件目录通常包含版本号，例如: publisher.name-version
+            if let Ok(entries) = std::fs::read_dir(&base_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        if let Some(fname) = path.file_name().and_then(|s| s.to_str()) {
+                            if fname.starts_with("nostalgia546.antigravity-booster-helper") {
+                                // 找到目录了，读取 package.json
+                                let pkg_path = path.join("package.json");
+                                if let Ok(content) = std::fs::read_to_string(&pkg_path) {
+                                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                                        if let Some(v) = json.get("version").and_then(|s| s.as_str()) {
+                                            installed_ver = Some(v.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if installed_ver.is_some() { break; }
+        }
+    }
+
+    let status = match &installed_ver {
+        None => "not_installed",
+        Some(v) => if v == LATEST_HELPER_VERSION { "installed" } else { "outdated" }
+    };
+
+    ExtensionStatus {
+        installed_version: installed_ver,
+        latest_version: LATEST_HELPER_VERSION.to_string(),
+        status: status.to_string(),
+    }
+}
+
+#[tauri::command]
+async fn restart_antigravity(app: AppHandle) -> Result<(), String> {
+    use sysinfo::System;
+    use std::process::Command;
+    use std::os::windows::process::CommandExt;
+    
+    // 1. Kill
+    let mut system = System::new_all();
+    system.refresh_all();
+    let mut running = false;
+    for (_, process) in system.processes() {
+        if process.name().to_lowercase() == "antigravity.exe" {
+            running = true; 
+            break;
+        }
+    }
+    
+    if running {
+        #[cfg(target_os = "windows")]
+        {
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            let _ = Command::new("taskkill").args(&["/IM", "Antigravity.exe"]).creation_flags(CREATE_NO_WINDOW).output();
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let _ = Command::new("taskkill").args(&["/F", "/IM", "Antigravity.exe"]).creation_flags(CREATE_NO_WINDOW).output();
+        }
+    }
+    
+    // 2. Restart
+    let config = load_config(&app);
+    let antigravity_dir = config.antigravity_executable.map(|p| std::path::PathBuf::from(p));
+    
+    #[cfg(target_os = "windows")]
+    {
+         let restart_path = antigravity_dir
+            .as_ref()
+            .map(|d| d.join("Antigravity.exe"))
+            .or_else(|| {
+                // Fallback attempt
+                 get_antigravity_dir(&app).map(|d| d.join("Antigravity.exe"))
+            });
+
+        if let Some(path) = restart_path {
+            if path.exists() {
+                // open crate handles detached process well
+                let _ = open::that(&path);
+                return Ok(());
+            }
+        }
+    }
+    
+    Err("无法找到 Antigravity 主程序，请手动启动".to_string())
+}
+
+
+#[tauri::command]
+fn analyze_network_gate() -> String {
     // 1. Check Env Vars first
     let env_proxy = std::env::var("ALL_PROXY")
         .or_else(|_| std::env::var("HTTPS_PROXY"))
@@ -391,12 +648,16 @@ fn detect_system_proxy() -> String {
     "Direct / Auto".to_string()
 }
 
-#[tauri::command]
-async fn sync_active_status(app: AppHandle) -> Result<String, String> {
-    use rusqlite::Connection;
-    use base64::{Engine as _, engine::general_purpose};
+fn log_event(app: &AppHandle, msg: &str) {
+    println!("{}", msg);
+    let _ = app.emit("debug-log", msg);
+}
 
-    // 0. Get proxy config for the user info request
+#[tauri::command]
+async fn reconcile_active_session(app: AppHandle) -> Result<String, String> {
+    use rusqlite::Connection;
+
+    // 1. 获取本地配置中的代理（如果有），用于身份验证请求
     let config = load_config(&app);
     let proxy_url = if config.proxy_enabled {
         Some(format!("{}://{}:{}", config.proxy_type, config.proxy_host, config.proxy_port))
@@ -404,138 +665,161 @@ async fn sync_active_status(app: AppHandle) -> Result<String, String> {
         None
     };
 
-    // 1. Identify DB Paths
+    // 2. 准备探测路径 (与 switch_account 镜像)
     let mut target_dbs = Vec::new();
     if let Some(home) = dirs::home_dir() {
         target_dbs.push(home.join("AppData/Roaming/Antigravity/User/globalStorage/state.vscdb"));
-        target_dbs.push(home.join("AppData/Roaming/com.antigravity.manager/storage.sqlite"));
+    }
+    if let Some(dir) = get_antigravity_dir(&app) {
+        target_dbs.push(dir.join("data/user-data/User/globalStorage/state.vscdb"));
     }
 
     let mut found_token = String::new();
 
-    // 2. Read DB to find current token
-    for db in target_dbs {
-        if !db.exists() { continue; }
-        if let Ok(conn) = Connection::open(&db) {
-            let _ = conn.execute("PRAGMA busy_timeout = 1000;", []);
+    // 3. 逐个数据库探测，优先寻找“鲜活”的 Token
+    for db_path in target_dbs {
+        if !db_path.exists() { continue; }
+        
+        log_event(&app, &format!("[Sync] Checking database: {:?}", db_path));
+        
+        if let Ok(conn) = Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) {
+            // 策略 A: 扫描所有已知的身份令牌键位 (覆盖多种存储协议分支)
+            let keys = "'current_user', 'jetskiStateSync.agentManagerInitState', 'cursor.auth.accessToken', 'gap.auth.accessToken'";
+            let query = format!("SELECT key, value FROM ItemTable WHERE key IN ({})", keys);
             
-            // Try V2 match (Base64 Protobuf)
-            let stmt = conn.prepare("SELECT value FROM ItemTable WHERE key = 'jetskiStateSync.agentManagerInitState'").ok();
-            if let Some(mut s) = stmt {
-                let rows = s.query_map([], |row| row.get::<_, String>(0)).ok();
+            if let Ok(mut stmt) = conn.prepare(&query) {
+                let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).ok();
                 if let Some(row_iter) = rows {
-                    for r in row_iter {
-                        if let Ok(b64) = r {
-                            if let Ok(bytes) = general_purpose::STANDARD.decode(&b64) {
-                                if let Ok(s) = String::from_utf8(bytes) {
-                                    if let Some(idx) = s.find("ya29.") {
-                                        let substr = &s[idx..];
-                                        let end = substr.find(|c: char| !c.is_ascii_alphanumeric() && c != '.' && c != '_' && c != '-').unwrap_or(substr.len());
-                                        found_token = substr[0..end].to_string();
-                                    }
-                                }
+                    for r in row_iter.flatten() {
+                        let (key, val) = r;
+                        let mut token = String::new();
+                        
+                        if val.starts_with("ya29.") {
+                            token = val;
+                        } else if let Ok(decoded_vec) = general_purpose::STANDARD.decode(&val) {
+                            let text = String::from_utf8_lossy(&decoded_vec);
+                            if let Some(start) = text.find("ya29.") {
+                                let substr = &text[start..];
+                                let end = substr.find(|c: char| !c.is_ascii_alphanumeric() && c != '.' && c != '_' && c != '-').unwrap_or(substr.len());
+                                token = substr[0..end].to_string();
                             }
                         }
-                    }
-                }
-            }
 
-            if !found_token.is_empty() { break; }
-
-            // Try V1 match (Plain String)
-            let stmt = conn.prepare("SELECT value FROM ItemTable WHERE key = 'current_user'").ok();
-            if let Some(mut s) = stmt {
-                let rows = s.query_map([], |row| row.get::<_, String>(0)).ok();
-                if let Some(row_iter) = rows {
-                    for r in row_iter {
-                        if let Ok(t) = r {
-                            if t.starts_with("ya29.") {
-                                found_token = t;
-                            }
+                        if !token.is_empty() {
+                            token = token.trim().trim_matches('"').to_string();
+                            // 如果这个 Token 能通过验证，或者本地能对上，我们就锁定它
+                            log_event(&app, &format!("[Sync] Candidate found in key '{}' from {:?}", key, db_path));
+                            found_token = token;
+                            // 注意：这里我们不 break，我们要继续尝试所有可能的 Key，或者所有数据库，直到找到能用的
                         }
                     }
                 }
             }
         }
-        if !found_token.is_empty() { break; }
+        if !found_token.is_empty() { break; } // 在当前数据库找到了就先试试
     }
+
+    // 3.5 Token 预处理：去掉可能存在的双引号和不可见字符
+    let found_token = found_token.trim().trim_matches('"').to_string();
 
     if found_token.is_empty() {
-        return Ok("No active Antigravity session found.".into());
+        log_event(&app, "[Sync] Result: No active identity found in state.vscdb");
+    } else {
+        log_event(&app, &format!("[Sync] Extracted Token prefix: {}...", &found_token[..10.min(found_token.len())]));
     }
 
-    // 3. Resolve Identity of found token (Crucial for robust matching)
-    let user_info = match oauth::get_user_info(&found_token, proxy_url).await {
-        Ok(info) => Some(info),
-        Err(_) => None, // Token might be valid but info request failed
-    };
-
-    // 4. Update or Insert
     let mut accounts = load_accounts(&app);
     let mut changed = false;
-    let mut matched_index = None;
-    let mut matched_name = "Unknown".to_string();
+    let status_msg: String;
 
-    let target_email = user_info.as_ref().map(|u| u.email.clone());
+    // 4. 解析身份
+    let mut matching_idx = None;
 
-    // Try to find existing by email OR exact token match
-    for (i, acc) in accounts.iter_mut().enumerate() {
-        let is_email_match = target_email.is_some() && target_email.as_ref().unwrap() == &acc.email;
-        let is_token_match = if let Some(td) = &acc.token_data {
-            td.access_token == found_token
-        } else {
-            acc.token == found_token
-        };
-
-        if is_email_match || is_token_match {
-            matched_index = Some(i);
-            matched_name = acc.name.clone();
-            
-            // DO NOT modify token_data here!
-            // The account already has proper OAuth data from login.
-            // We only care about setting is_active flag.
-
-            if !acc.is_active {
-                acc.is_active = true;
-                changed = true;
+    if !found_token.is_empty() {
+        // --- 策略 A: 本地 Token 快速查表 (最强力，不依赖网络，不惧过期) ---
+        for (i, acc) in accounts.iter().enumerate() {
+            let mut is_match = false;
+            if acc.token == found_token {
+                is_match = true;
+            } else if let Some(td) = &acc.token_data {
+                if td.access_token == found_token {
+                    is_match = true;
+                }
             }
-        } else {
-            // Unmark others
-            if acc.is_active {
-                acc.is_active = false;
-                changed = true;
+
+            if is_match {
+                log_event(&app, &format!("[Sync] Perfect local match found: {}", acc.name));
+                matching_idx = Some(i);
+                break;
+            }
+        }
+
+        // --- 策略 B: 只有本地查不到，才请求 Google API ---
+        if matching_idx.is_none() {
+            log_event(&app, "[Sync] No local match. Requesting Google API identity verification...");
+            match oauth::get_user_info(&found_token, proxy_url).await {
+                Ok(info) => {
+                    let editor_email = info.email.to_lowercase();
+                    log_event(&app, &format!("[Sync] Online check confirmed: {}", editor_email));
+                    
+                    for (i, acc) in accounts.iter().enumerate() {
+                        if acc.email.to_lowercase() == editor_email {
+                            matching_idx = Some(i);
+                            break;
+                        }
+                    }
+                },
+                Err(e) => {
+                    log_event(&app, &format!("[Sync] Google API verification failed: {}. Token may be fully expired or network issue.", e));
+                }
             }
         }
     }
 
-    // If not found, Auto-Import (only if we have user info)
-    if matched_index.is_none() && user_info.is_some() {
-        let new_id = uuid::Uuid::new_v4().to_string();
-        matched_name = user_info.as_ref().and_then(|u| u.name.clone()).unwrap_or_else(|| "Antigravity 当前用户".to_string());
-        
-        let new_acc = crate::storage::Account {
-            id: new_id,
-            name: matched_name.clone(),
-            email: target_email.unwrap_or_else(|| "auto-sync@antigravity".into()),
-            token: found_token.clone(),
-            token_data: None, 
-            account_type: "Gemini".into(),
-            status: "active".into(),
-            quota: None,
-            is_active: true,
-        };
-        
-        accounts.push(new_acc);
-        changed = true;
+    // 5. 应用同步结果
+    if let Some(idx) = matching_idx {
+        // 情况 A: 找到了对应的账号
+        let name = accounts[idx].name.clone();
+        for (i, acc) in accounts.iter_mut().enumerate() {
+            let should_be_active = i == idx;
+            if acc.is_active != should_be_active {
+                acc.is_active = should_be_active;
+                changed = true;
+            }
+            
+            // 核心修复：如果识别到了是这个号，不管 is_active 有没有变，都把最新的 Token 同步过来
+            // 解决“编辑器自动刷新了 Token，但 Booster 还在用旧 Token 刷新导致数据不准”的问题
+            if should_be_active && !found_token.is_empty() && acc.token != found_token {
+                acc.token = found_token.clone();
+                if let Some(td) = &mut acc.token_data {
+                    td.access_token = found_token.clone();
+                }
+                changed = true;
+            }
+        }
+        status_msg = format!("同步成功: 已识别为账号 '{}' 并标记激活", name);
+    } else if !found_token.is_empty() {
+        // 情况 B: 编辑器有登录，但 Booster 里没这个号
+        for acc in &mut accounts {
+            if acc.is_active { acc.is_active = false; changed = true; }
+        }
+        status_msg = "检测到未知账号，已取消本地活跃状态".into();
+    } else {
+        // 情况 C: 编辑器未登录
+        for acc in &mut accounts {
+            if acc.is_active { acc.is_active = false; changed = true; }
+        }
+        status_msg = "编辑器未登录任何账号".into();
     }
 
     if changed {
-        save_accounts(&app, &accounts).map_err(|e| e.to_string())?;
-        Ok(format!("Synced status: Active account is '{}'", matched_name))
-    } else {
-        Ok("Status already synced.".into())
+        let _ = save_accounts(&app, &accounts);
+        let _ = app.emit("quota-updated", ());
     }
+    
+    Ok(status_msg)
 }
+
 
 #[tauri::command]
 fn get_usage_chart(app: AppHandle, display_minutes: i64, bucket_minutes: i64) -> history::UsageChartData {
@@ -573,9 +857,12 @@ async fn start_auto_refresh_task(app: AppHandle) {
         };
         
         if let Ok((new_quota, detected_tier, _)) = quota::fetch_account_quota_real(&access_token, &acc.email, None).await {
-            acc.quota = Some(new_quota);
+            acc.quota = Some(new_quota.clone());
             if !detected_tier.is_empty() {
                 acc.account_type = detected_tier;
+            }
+            if acc.is_active {
+                 write_quota_bridge_file(&app, &new_quota);
             }
         }
     }
@@ -583,34 +870,243 @@ async fn start_auto_refresh_task(app: AppHandle) {
     let _ = history::record_quota_point(&app);
     let _ = app.emit("quota-updated", ());
     
-    // Then continue with 5-minute interval
     loop {
-        sleep(Duration::from_secs(300)).await; // 5 minutes
+        let now_ts = chrono::Utc::now().timestamp();
+        let mut next_run = now_ts + 300; // 默认 5 分钟频率
+        
+        // 核心改进：抢占式记录。检查是否有账号在 5 分钟内即将重置
+        {
+            let accounts = load_accounts(&app);
+            for acc in &accounts {
+                if let Some(quota) = &acc.quota {
+                    for model in &quota.models {
+                        if let Some(reset_ts) = model.reset_at {
+                            let pre_reset_target = reset_ts - 60; // 重置前 1 分钟
+                            if pre_reset_target > now_ts && pre_reset_target < next_run {
+                                // 发现一个更紧急的重置临界点，抢占下一次运行时间
+                                next_run = pre_reset_target;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let sleep_secs = (next_run - now_ts).max(5); // 确保至少睡 5 秒，防止极端情况下的死循环
+        sleep(Duration::from_secs(sleep_secs as u64)).await;
+
+        // 1. 同步真实身份
+        let _ = reconcile_active_session(app.clone()).await;
         
         let mut accounts = load_accounts(&app);
+        let config = load_config(&app);
+        let proxy_url = if config.proxy_enabled {
+            Some(format!("{}://{}:{}", config.proxy_type, config.proxy_host, config.proxy_port))
+        } else {
+            None
+        };
         
+        let is_major_tick = (now_ts / 60) % 30 < 5; // 使用 loop 开头的 now_ts
+
+        let mut any_fetched = false;
         for acc in &mut accounts {
-            let access_token = if acc.token.starts_with("1//") {
-                match oauth::refresh_access_token(&acc.token, None).await {
-                    Ok(at) => at,
-                    Err(_) => continue,
-                }
-            } else {
-                acc.token.clone()
-            };
+            // 策略：如果是活跃账号，或者到了 30 分钟的全量扫描点，或者该账号从未获取过数据
+            let should_fetch = acc.is_active || is_major_tick || acc.quota.is_none();
             
-            if let Ok((new_quota, detected_tier, _)) = quota::fetch_account_quota_real(&access_token, &acc.email, None).await {
-                acc.quota = Some(new_quota);
-                if !detected_tier.is_empty() {
-                    acc.account_type = detected_tier;
+            if should_fetch {
+                let access_token = if acc.token.starts_with("1//") {
+                    match oauth::refresh_access_token(&acc.token, proxy_url.clone()).await {
+                        Ok(at) => at,
+                        Err(_) => continue,
+                    }
+                } else {
+                    acc.token.clone()
+                };
+                
+                if let Ok((new_quota, detected_tier, _)) = quota::fetch_account_quota_real(&access_token, &acc.email, proxy_url.clone()).await {
+                    acc.quota = Some(new_quota.clone());
+                    if !detected_tier.is_empty() {
+                        acc.account_type = detected_tier;
+                    }
+                    if acc.is_active {
+                         write_quota_bridge_file(&app, &new_quota);
+                    }
+                    any_fetched = true;
                 }
             }
         }
         
-        let _ = save_accounts(&app, &accounts);
+        if any_fetched {
+            let mut disk_accounts = load_accounts(&app);
+            for d_acc in &mut disk_accounts {
+                if let Some(refreshed) = accounts.iter().find(|a| a.id == d_acc.id) {
+                    if refreshed.quota.is_some() {
+                        d_acc.quota = refreshed.quota.clone();
+                        d_acc.account_type = refreshed.account_type.clone();
+                    }
+                }
+            }
+            let _ = save_accounts(&app, &disk_accounts);
+        }
+
+        // 核心改进：每一轮都要记录 point 和广播，确保图表能够实时推移显示“当前”
         let _ = history::record_quota_point(&app);
         let _ = app.emit("quota-updated", ());
+        log_event(&app, "[Task] Cycle completed: Sync, refresh and history point recorded.");
     }
+}
+
+#[tauri::command]
+async fn import_account_from_antigravity(app: AppHandle) -> Result<Account, String> {
+    log_event(&app, "[Import] Starting intelligent account extraction...");
+
+    // 1. 探测所有可能的候选 Token
+    let candidates = find_all_tokens_in_editor(&app).await;
+    if candidates.is_empty() {
+        log_event(&app, "[Import] Error: No valid-looking tokens found in Editor.");
+        return Err("未能检测到登录信息，请确保编辑器已登录。".into());
+    }
+
+    log_event(&app, &format!("[Import] Found {} candidate tokens. Testing them one by one...", candidates.len()));
+
+    // 2. 获取代理配置
+    let config = load_config(&app);
+    let proxy_url = if config.proxy_enabled {
+        Some(format!("{}://{}:{}", config.proxy_type, config.proxy_host, config.proxy_port))
+    } else {
+        None
+    };
+
+    // 3. 逐个尝试验证，直到找到活的
+    let mut verified_info = None;
+    let mut working_token = String::new();
+
+    for token in candidates {
+        log_event(&app, &format!("[Import] Testing token prefix: {}...", &token[..10.min(token.len())]));
+        match oauth::get_user_info(&token, proxy_url.clone()).await {
+            Ok(info) => {
+                verified_info = Some(info);
+                working_token = token;
+                break; // 找到了活的，立即退出循环
+            },
+            Err(e) => {
+                log_event(&app, &format!("[Import] This token is invalid (401/Network Error), trying next... Error: {}", e));
+            }
+        }
+    }
+
+    let info = match verified_info {
+        Some(i) => i,
+        None => {
+            log_event(&app, "[Import] Error: All discovered tokens are expired or invalid.");
+            return Err("所有探测到的登录信息均已过期，请在编辑器中重新登录。".into());
+        }
+    };
+
+    log_event(&app, &format!("[Import] Identity confirmed: {} ({})", info.name.as_deref().unwrap_or("Unknown"), info.email));
+
+    let mut accounts = load_accounts(&app);
+    let email = info.email.to_lowercase();
+    let mut target_acc = None;
+
+    // 4. 全部先设为不活跃
+    for acc in &mut accounts {
+        acc.is_active = false;
+    }
+
+    // 5. 查找或创建
+    let mut is_new = true;
+    for acc in &mut accounts {
+        if acc.email.to_lowercase() == email {
+            log_event(&app, "[Import] Account already exists. Updating token and activating...");
+            acc.token = working_token.clone();
+            acc.token_data = Some(TokenData {
+                access_token: working_token.clone(),
+                refresh_token: "".to_string(),
+                expires_at: chrono::Utc::now().timestamp() + 3500,
+            });
+            acc.is_active = true;
+            target_acc = Some(acc.clone());
+            is_new = false;
+            break;
+        }
+    }
+
+    if is_new {
+        log_event(&app, "[Import] Creating new account record...");
+        let new_acc = Account {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: info.name.clone().unwrap_or_else(|| info.email.clone()),
+            email: info.email.clone(),
+            token: working_token.clone(),
+            token_data: Some(TokenData {
+                access_token: working_token,
+                refresh_token: "".to_string(),
+                expires_at: chrono::Utc::now().timestamp() + 3500,
+            }),
+            account_type: "Gemini".to_string(),
+            status: "active".to_string(),
+            quota: None,
+            is_active: true,
+        };
+        accounts.push(new_acc.clone());
+        target_acc = Some(new_acc);
+    }
+
+    // 6. 保存并广播
+    save_accounts(&app, &accounts).map_err(|e| e.to_string())?;
+    let _ = app.emit("quota-updated", ()); // 强制 UI 刷新
+    
+    log_event(&app, "[Import] SUCCESS! Account is now ready.");
+    
+    match target_acc {
+        Some(a) => Ok(a),
+        None => Err("逻辑异常：未捕获到目标账号".into())
+    }
+}
+
+// 辅助函数：提取所有候选 Token
+async fn find_all_tokens_in_editor(app: &AppHandle) -> Vec<String> {
+    use rusqlite::Connection;
+    let mut candidates = Vec::new();
+    let mut target_dbs = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        target_dbs.push(home.join("AppData/Roaming/Antigravity/User/globalStorage/state.vscdb"));
+    }
+    if let Some(dir) = get_antigravity_dir(app) {
+        target_dbs.push(dir.join("data/user-data/User/globalStorage/state.vscdb"));
+    }
+
+    for db_path in target_dbs {
+        if !db_path.exists() { continue; }
+        if let Ok(conn) = Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) {
+            let keys = "'current_user', 'jetskiStateSync.agentManagerInitState', 'cursor.auth.accessToken', 'gap.auth.accessToken'";
+            let query = format!("SELECT value FROM ItemTable WHERE key IN ({})", keys);
+            if let Ok(mut stmt) = conn.prepare(&query) {
+                let mut rows = stmt.query_map([], |row| row.get::<usize, String>(0)).ok().unwrap();
+                while let Some(Ok(val)) = rows.next() {
+                    let mut token = String::new();
+                    if val.starts_with("ya29.") {
+                        token = val;
+                    } else if let Ok(decoded_vec) = general_purpose::STANDARD.decode(&val) {
+                        let text = String::from_utf8_lossy(&decoded_vec);
+                        if let Some(start) = text.find("ya29.") {
+                            let substr = &text[start..];
+                            let end = substr.find(|c: char| !c.is_ascii_alphanumeric() && c != '.' && c != '_' && c != '-').unwrap_or(substr.len());
+                            token = substr[0..end].to_string();
+                        }
+                    }
+                    if !token.is_empty() {
+                        let clean_token = token.trim().trim_matches('"').to_string();
+                        if !candidates.contains(&clean_token) {
+                            candidates.push(clean_token);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    candidates
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -623,6 +1119,12 @@ pub fn run() {
         .setup(|app| {
             let app_handle = app.handle().clone();
             
+            // 异步后台执行 DLL 维护，防止白屏
+            let maintenance_handle = app_handle.clone();
+            tauri::async_runtime::spawn(async move {
+                crate::proxy::ensure_dll_compatibility(&maintenance_handle);
+            });
+
             // Create Tray Menu
             let quit_i = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
             let show_i = MenuItem::with_id(app, "show", "显示主界面", true, None::<&str>)?;
@@ -674,25 +1176,29 @@ pub fn run() {
             _ => {}
         })
         .invoke_handler(tauri::generate_handler![
-            get_accounts,
+            sync_vault_entries,
             save_account,
             delete_account,
+            import_account_from_antigravity,
+            export_backup,
             switch_account,
-            sync_active_status, // Added here
-            get_config,
-            set_config,
-            fetch_account_quota,
+            reconcile_active_session,
+            load_booster_settings,
+            update_booster_settings,
+            pulse_check_quota,
             start_boosting,
             stop_boosting,
-            detect_system_proxy,
-            migration::import_from_antigravity_v1,
+            analyze_network_gate,
             oauth::import_backup,
             oauth::export_backup,
             oauth::start_oauth_login,
             get_usage_chart,
             enable_system_proxy,
             disable_system_proxy,
-            is_proxy_enabled
+            is_proxy_enabled,
+            install_assistant_extension,
+            restart_antigravity,
+            get_extension_status
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

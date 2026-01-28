@@ -1,54 +1,54 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
-    <ClCompile Include="C:\我的\Project\Antigravity-Booster\version-dll\build\CMakeFiles\version.dir\cmake_pch.cxx">
+    <ClCompile Include="C:\我的\Project\Antigravity-Booster\Antigravity-Booster\version-dll\build\CMakeFiles\version.dir\cmake_pch.cxx">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="C:\我的\Project\Antigravity-Booster\version-dll\dllmain.cpp">
+    <ClCompile Include="C:\我的\Project\Antigravity-Booster\Antigravity-Booster\version-dll\dllmain.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="C:\我的\Project\Antigravity-Booster\version-dll\proxy.cpp">
+    <ClCompile Include="C:\我的\Project\Antigravity-Booster\Antigravity-Booster\version-dll\proxy.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="C:\我的\Project\Antigravity-Booster\version-dll\pch.cpp">
+    <ClCompile Include="C:\我的\Project\Antigravity-Booster\Antigravity-Booster\version-dll\pch.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="C:\我的\Project\Antigravity-Booster\version-dll\version_forwarder.cpp">
+    <ClCompile Include="C:\我的\Project\Antigravity-Booster\Antigravity-Booster\version-dll\version_forwarder.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="C:\我的\Project\Antigravity-Booster\version-dll\proxy.h">
+    <ClInclude Include="C:\我的\Project\Antigravity-Booster\Antigravity-Booster\version-dll\proxy.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="C:\我的\Project\Antigravity-Booster\version-dll\pch.h">
+    <ClInclude Include="C:\我的\Project\Antigravity-Booster\Antigravity-Booster\version-dll\pch.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="C:\我的\Project\Antigravity-Booster\version-dll\build\CMakeFiles\version.dir\Debug\cmake_pch.hxx">
+    <ClInclude Include="C:\我的\Project\Antigravity-Booster\Antigravity-Booster\version-dll\build\CMakeFiles\version.dir\Debug\cmake_pch.hxx">
       <Filter>Precompile Header File</Filter>
     </ClInclude>
-    <ClInclude Include="C:\我的\Project\Antigravity-Booster\version-dll\build\CMakeFiles\version.dir\Release\cmake_pch.hxx">
+    <ClInclude Include="C:\我的\Project\Antigravity-Booster\Antigravity-Booster\version-dll\build\CMakeFiles\version.dir\Release\cmake_pch.hxx">
       <Filter>Precompile Header File</Filter>
     </ClInclude>
-    <ClInclude Include="C:\我的\Project\Antigravity-Booster\version-dll\build\CMakeFiles\version.dir\MinSizeRel\cmake_pch.hxx">
+    <ClInclude Include="C:\我的\Project\Antigravity-Booster\Antigravity-Booster\version-dll\build\CMakeFiles\version.dir\MinSizeRel\cmake_pch.hxx">
       <Filter>Precompile Header File</Filter>
     </ClInclude>
-    <ClInclude Include="C:\我的\Project\Antigravity-Booster\version-dll\build\CMakeFiles\version.dir\RelWithDebInfo\cmake_pch.hxx">
+    <ClInclude Include="C:\我的\Project\Antigravity-Booster\Antigravity-Booster\version-dll\build\CMakeFiles\version.dir\RelWithDebInfo\cmake_pch.hxx">
       <Filter>Precompile Header File</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <CustomBuild Include="C:\我的\Project\Antigravity-Booster\version-dll\CMakeLists.txt" />
+    <CustomBuild Include="C:\我的\Project\Antigravity-Booster\Antigravity-Booster\version-dll\CMakeLists.txt" />
   </ItemGroup>
   <ItemGroup>
     <Filter Include="Header Files">
-      <UniqueIdentifier>{BD0A94D4-9EF6-30B8-BBBE-EE86585D8F82}</UniqueIdentifier>
+      <UniqueIdentifier>{A76856B6-BBBA-342F-968E-367BDCF24A69}</UniqueIdentifier>
     </Filter>
     <Filter Include="Precompile Header File">
-      <UniqueIdentifier>{241FEC59-0B0A-3BA2-AE67-8D3DE064D1E4}</UniqueIdentifier>
+      <UniqueIdentifier>{97A326C6-25D4-31CE-AF1F-50A812B5A10C}</UniqueIdentifier>
     </Filter>
     <Filter Include="Source Files">
-      <UniqueIdentifier>{5A74F2FB-19DB-310D-AE9B-64413DB8BE16}</UniqueIdentifier>
+      <UniqueIdentifier>{757FF426-24CB-3DBF-9018-5CDDFC77BAFD}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
 </Project>

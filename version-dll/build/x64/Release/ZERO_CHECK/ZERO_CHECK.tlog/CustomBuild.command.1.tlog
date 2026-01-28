@@ -1,6 +1,6 @@
-^C:\我的\PROJECT\ANTIGRAVITY-BOOSTER\VERSION-DLL\BUILD\CMAKEFILES\0D29FF9467E4B24FDA7CB3D6C00AE6C0\GENERATE.STAMP.RULE
+^C:\我的\PROJECT\ANTIGRAVITY-BOOSTER\ANTIGRAVITY-BOOSTER\VERSION-DLL\BUILD\CMAKEFILES\02A2534FCC9121E30A0D29F64D43160B\GENERATE.STAMP.RULE
 setlocal
-"C:\Program Files\CMake\bin\cmake.exe" -SC:/我的/Project/Antigravity-Booster/version-dll -BC:/我的/Project/Antigravity-Booster/version-dll/build --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/我的/Project/Antigravity-Booster/version-dll/build/version_dll.sln
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/我的/Project/Antigravity-Booster/Antigravity-Booster/version-dll -BC:/我的/Project/Antigravity-Booster/Antigravity-Booster/version-dll/build --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/我的/Project/Antigravity-Booster/Antigravity-Booster/version-dll/build/version_dll.sln
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone

@@ -18,7 +18,8 @@ import {
   Minus,
   Maximize2,
   Minimize2,
-  X
+  X,
+  Puzzle
 } from "lucide-vue-next";
 import { useAppStore } from "./stores/app";
 import { invoke } from "@tauri-apps/api/core";
@@ -32,15 +33,15 @@ const detectedProxy = ref('Checking...');
 const syncData = async () => {
   try {
     // 1. Sync active status with real Antigravity DB first
-    await invoke("sync_active_status").catch(e => console.warn(e));
+    await invoke("reconcile_active_session").catch(e => console.warn(e));
 
-    const accs = await invoke("get_accounts");
+    const accs = await invoke("sync_vault_entries");
     store.accounts = accs as any;
     
-    const config = await invoke("get_config");
+    const config = await invoke("load_booster_settings");
     store.proxyConfig = config as any;
     
-    detectedProxy.value = await invoke("detect_system_proxy");
+    detectedProxy.value = await invoke("analyze_network_gate");
     
     // Check proxy status
     try {
@@ -88,7 +89,7 @@ const toggleProxy = async () => {
 const refreshQuota = async (id: string) => {
   try {
     store.addLog("Refreshing account usage...");
-    await invoke("fetch_account_quota", { id });
+    await invoke("pulse_check_quota", { id });
     await syncData();
     store.addLog("Usage data updated.");
   } catch (err) {
@@ -104,10 +105,17 @@ const chartKey = ref(0); // 用于触发动画
 const loadChartData = async () => {
   isLoadingChart.value = true;
   try {
-    const displayMinutes = chartTimeRange.value * 24 * 60; // Convert days to minutes
-    const bucketMinutes = chartTimeRange.value === 1 ? 30 : (chartTimeRange.value === 3 ? 60 : 120); // Adjust bucket size
-    chartData.value = await invoke("get_usage_chart", { displayMinutes, bucketMinutes });
-    chartKey.value++; // 触发重新渲染和动画
+    const displayMinutes = chartTimeRange.value * 24 * 60;
+    const bucketMinutes = chartTimeRange.value === 1 ? 30 : (chartTimeRange.value === 3 ? 60 : 120);
+    const newData = await invoke("get_usage_chart", { displayMinutes, bucketMinutes });
+    
+    // 性能优化 & 视觉体验：比对数据是否真正发生变化，避免相同数据重复触发动画
+    const isDifferent = JSON.stringify(newData) !== JSON.stringify(chartData.value);
+    chartData.value = newData;
+    
+    if (isDifferent) {
+      chartKey.value++; // 只有数据变了才触发动画
+    }
   } catch (err) {
     console.error("Failed to load chart data:", err);
   } finally {
@@ -255,6 +263,69 @@ const cancelDelete = () => {
   deleteConfirmData.value = null;
 };
 
+// --- Extension Logic ---
+interface ExtensionInfo {
+  installed_version: string | null;
+  latest_version: string;
+  status: string;
+}
+
+const extStatus = ref("unknown"); // not_installed, outdated, installed
+const extInfo = ref<ExtensionInfo | null>(null);
+const isInstallingExt = ref(false);
+
+const checkExtensionStatus = async () => {
+    try {
+        const status = await invoke<ExtensionInfo>("get_extension_status");
+        extInfo.value = status;
+        extStatus.value = status.status;
+    } catch (e) {
+        console.error("Ext check failed", e);
+    }
+}
+
+// Actions
+const showRestartConfirm = ref(false);
+const restartConfirmType = ref('manual'); // manual, after_install
+
+const triggerRestart = () => {
+    restartConfirmType.value = 'manual';
+    showRestartConfirm.value = true;
+}
+
+const confirmRestart = async () => {
+    showRestartConfirm.value = false;
+    try {
+        await invoke("restart_antigravity");
+        store.addLog("已发送重启命令");
+    } catch(e) {
+        store.addLog(`重启失败: ${e}`);
+    }
+}
+
+const installExtension = async () => {
+    isInstallingExt.value = true;
+    try {
+        const msg = await invoke("install_assistant_extension");
+        store.addLog(`插件安装: ${msg}`);
+        await checkExtensionStatus();
+        
+        // Show custom restart modal
+        restartConfirmType.value = 'after_install';
+        showRestartConfirm.value = true;
+    } catch (e) {
+        store.addLog(`插件安装失败: ${e}`);
+    } finally {
+        isInstallingExt.value = false;
+    }
+}
+
+// Check on mount and periodically
+onMounted(async () => {
+    checkExtensionStatus();
+    setInterval(checkExtensionStatus, 10000); // Check every 10s
+});
+
 const isLoggingIn = ref(false);
 const handleAddAccount = async () => {
   if (isLoggingIn.value) return;
@@ -323,7 +394,7 @@ const refreshAllQuotas = async () => {
   for (const acc of store.accounts) {
     try {
       store.addLog(`[${acc.name}] 正在获取数据...`);
-      await invoke("fetch_account_quota", { id: acc.id });
+      await invoke("pulse_check_quota", { id: acc.id });
     } catch (e) {
       store.addLog(`Error ${acc.name}: ${e}`);
     }
@@ -366,6 +437,27 @@ onMounted(async () => {
     isMaximized.value = await appWindow.isMaximized();
   });
 });
+const showLogModal = ref(false);
+
+const isImportingFromEditor = ref(false);
+const handleImportFromAntigravity = async () => {
+    if (isImportingFromEditor.value) return;
+    isImportingFromEditor.value = true;
+    try {
+        store.addLog("尝试从编辑器导入账号...");
+        const acc = await invoke("import_account_from_antigravity");
+        await syncData();
+        if (acc && (acc as any).id) {
+            await refreshQuota((acc as any).id);
+        }
+        store.addLog(`导入成功: ${(acc as any).name}`);
+        activeTab.value = 'accounts';
+    } catch (e) {
+        store.addLog(`导入失败: ${e}`);
+    } finally {
+        isImportingFromEditor.value = false;
+    }
+}
 </script>
 
 <template>
@@ -394,6 +486,9 @@ onMounted(async () => {
       </div>
       <div class="nav-item" :class="{ active: activeTab === 'accounts' }" @click="activeTab = 'accounts'">
         <Users /> 账号管理
+      </div>
+      <div class="nav-item" :class="{ active: activeTab === 'extension' }" @click="activeTab = 'extension'">
+        <Puzzle /> 编辑器插件
       </div>
       <div class="nav-item" :class="{ active: activeTab === 'settings' }" @click="activeTab = 'settings'">
         <Info /> 关于
@@ -427,6 +522,8 @@ onMounted(async () => {
           {{ isTogglingProxy ? '请稍候...' : (isProxyEnabled ? '禁用代理' : '启用代理') }}
         </button>
       </div>
+
+      
       
       <button class="btn btn-ghost" @click="store.toggleTheme">
         <component :is="store.theme === 'light' ? Moon : Sun" :size="20" />
@@ -487,7 +584,15 @@ onMounted(async () => {
                 </div>
                 <div style="display: flex; justify-content: space-between; font-size: 0.7rem; color: var(--text-secondary); margin-top: 0.5rem;">
                   <span>重置时间</span>
-                  <span>{{ q.reset_time }}</span>
+                  <span>{{ q.reset_time.replace(/(\d+)\s*小时/, (m, hStr) => {
+                      const h = parseInt(hStr);
+                      if (h >= 24) {
+                          const days = Math.floor(h / 24);
+                          const remH = h % 24;
+                          return remH > 0 ? `${days}天${remH}小时` : `${days}天`;
+                      }
+                      return m;
+                  }) }}</span>
                 </div>
               </div>
             </div>
@@ -605,6 +710,64 @@ onMounted(async () => {
         </div>
       </div>
 
+      <!-- Extension Management -->
+      <div v-if="activeTab === 'extension'" class="animate-fade-in" style="height: calc(100vh - 70px - 2rem); display: flex; align-items: center; justify-content: center; margin-top: -20px;">
+        <div style="width: 100%; max-width: 700px; text-align: center;">
+          <div style="margin-bottom: 2.5rem;">
+            <div style="width: 120px; height: 120px; background: var(--surface-hover); border-radius: 28px; display: flex; align-items: center; justify-content: center; margin: 0 auto; box-shadow: 0 15px 35px rgba(0,0,0,0.15); position: relative;">
+                <Puzzle :size="60" color="var(--accent)" />
+            </div>
+          </div>
+          <h1 style="font-size: 2.25rem; font-weight: 800; margin-bottom: 0.75rem;">Antigravity Booster Helper</h1>
+          <p style="color: var(--text-secondary); font-size: 1.125rem; max-width: 500px; margin: 0 auto; line-height: 1.6;">
+            {{ extStatus === 'installed' ? '目前插件状态良好，正在为您保驾护航。' : (extStatus === 'outdated' ? '检测到新版本，建议立即升级以获得最佳体验。' : '安装插件以解锁完整功能。') }}
+          </p>
+          
+          <div style="display: flex; flex-direction: column; gap: 1rem; align-items: center; margin-top: 2.5rem; margin-bottom: 3rem;">
+              <div v-if="extStatus === 'installed'" class="badge badge-success" style="padding: 0.6rem 1.25rem; font-size: 0.9rem; border-radius: 2rem;">
+                  已安装 v{{ extInfo?.installed_version }}
+              </div>
+              <div v-else-if="extStatus === 'outdated'" class="badge badge-info" style="padding: 0.6rem 1.25rem; font-size: 0.9rem; border-radius: 2rem;">
+                  有更新: v{{ extInfo?.installed_version }} → v{{ extInfo?.latest_version }}
+              </div>
+              <div v-else class="badge badge-warning" style="padding: 0.6rem 1.25rem; font-size: 0.9rem; border-radius: 2rem;">
+                  未检测到安装
+              </div>
+          </div>
+
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; margin-bottom: 4rem;">
+              <div style="text-align: left; padding: 1.5rem; background: var(--surface-hover); border-radius: 1rem;">
+                  <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem;">
+                    <Activity :size="20" color="var(--success)" />
+                    <span style="font-weight: 700; font-size: 1rem;">状态同步</span>
+                  </div>
+                  <div style="font-size: 0.875rem; opacity: 0.8; line-height: 1.6;">在 Antigravity 状态栏实时显示当前账号的配额余量。</div>
+              </div>
+              <div style="text-align: left; padding: 1.5rem; background: var(--surface-hover); border-radius: 1rem;">
+                  <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem;">
+                    <ZapOff :size="20" color="var(--accent)" />
+                    <span style="font-weight: 700; font-size: 1rem;">自动同意</span>
+                  </div>
+                  <div style="font-size: 0.875rem; opacity: 0.8; line-height: 1.6;">无需手动点击，自动接受 Agent 发起的修改建议与终端请求。</div>
+              </div>
+          </div>
+
+          <div style="display: flex; gap: 1.5rem; justify-content: center;">
+              <button 
+                class="btn btn-primary" 
+                style="padding: 1rem 3rem; border-radius: 0.875rem; font-weight: 600; min-width: 180px; font-size: 1rem;" 
+                @click="installExtension"
+                :disabled="isInstallingExt">
+                <RefreshCw v-if="isInstallingExt" :size="20" class="spin" style="margin-right: 0.75rem;" />
+                {{ extStatus === 'installed' ? '重新安装' : (extStatus === 'outdated' ? '立即更新' : '安装插件') }}
+              </button>
+              <button v-if="extStatus === 'installed'" class="btn btn-ghost" style="border: 1px solid var(--border); padding: 1rem 3rem; border-radius: 0.875rem; font-size: 1rem;" @click="triggerRestart">
+                <RefreshCw :size="20" style="margin-right: 0.75rem;" /> 重启软件
+              </button>
+          </div>
+        </div>
+      </div>
+
       <!-- Accounts -->
       <div v-if="activeTab === 'accounts'" class="animate-fade-in">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem;">
@@ -665,7 +828,15 @@ onMounted(async () => {
                 </div>
                 <div style="display: flex; justify-content: space-between; font-size: 0.65rem; color: var(--text-secondary); margin-top: 0.4rem;">
                   <span>重置时间</span>
-                  <span>{{ m.reset_time }}</span>
+                  <span>{{ m.reset_time.replace(/(\d+)\s*小时/, (m, hStr) => {
+                      const h = parseInt(hStr);
+                      if (h >= 24) {
+                          const days = Math.floor(h / 24);
+                          const remH = h % 24;
+                          return remH > 0 ? `${days}天${remH}小时` : `${days}天`;
+                      }
+                      return m;
+                  }) }}</span>
                 </div>
               </div>
             </div>
@@ -696,37 +867,36 @@ onMounted(async () => {
       </div>
 
       <!-- About Page -->
-      <div v-if="activeTab === 'settings'" class="animate-fade-in">
-        <h2 style="margin-bottom: 2rem;">关于</h2>
-        
-        <div class="grid" style="grid-template-columns: 1fr;">
-          <!-- App Info Card -->
-          <div class="card" style="text-align: center; padding: 4rem 2rem;">
-            <div style="margin-bottom: 2.5rem;">
+      <div v-if="activeTab === 'settings'" class="animate-fade-in" style="height: calc(100vh - 70px - 2rem); display: flex; align-items: center; justify-content: center; margin-top: -20px;">
+        <div style="width: 100%; max-width: 700px; text-align: center;">
+            <div style="margin-bottom: 3.5rem;">
               <img src="./assets/logo.png" style="width: 120px; height: 120px; border-radius: 28px; box-shadow: 0 15px 35px rgba(0,0,0,0.15); object-fit: cover; margin: 0 auto;" />
             </div>
-            <h1 style="font-size: 2.25rem; font-weight: 800; margin-bottom: 0.5rem; color: var(--text-primary); letter-spacing: -0.025em;">Antigravity Booster</h1>
-            <p style="color: var(--text-secondary); font-size: 0.875rem; margin-bottom: 2rem; font-family: 'JetBrains Mono', monospace;">Version 1.2.1 (Build 20260127)</p>
+            <h1 style="font-size: 3rem; font-weight: 800; margin-bottom: 0.5rem; color: var(--text-primary); letter-spacing: -0.04em;">Antigravity Booster</h1>
+            <p style="color: var(--text-secondary); font-size: 1rem; margin-bottom: 3rem; font-family: 'JetBrains Mono', monospace; letter-spacing: 1px;">Version 1.4.0 (Build 20260128)</p>
             
-            <div style="max-width: 550px; margin: 0 auto 2.5rem; line-height: 1.8; color: var(--text-secondary); font-size: 0.95rem;">
-              Antigravity Booster 是专门为您打造的效能增强助手。不仅解决了复杂的网络代理问题，更提供了优雅的多账号管理体验。
+            <div style="max-width: 600px; margin: 0 auto 3.5rem; line-height: 2; color: var(--text-secondary); font-size: 1.125rem;">
+                Antigravity Booster 是专门为您打造的效能增强助手。<br/>不仅解决了复杂的网络代理问题，更提供了优雅的多账号管理体验。
             </div>
 
-            <div style="display: flex; justify-content: center; gap: 1rem; margin-bottom: 3rem;">
-              <a href="https://github.com/Nostalgia546/Antigravity-Booster" target="_blank" class="btn btn-primary" style="text-decoration: none; display: flex; align-items: center; gap: 0.5rem; padding: 0.75rem 1.5rem; border-radius: 0.75rem;">
-                <Globe :size="18" /> GitHub 仓库
+            <div style="display: flex; justify-content: center; gap: 1.5rem; margin-bottom: 2rem;">
+              <a href="https://github.com/Nostalgia546/Antigravity-Booster" target="_blank" class="btn btn-primary" style="text-decoration: none; display: flex; align-items: center; gap: 0.75rem; padding: 1rem 2.5rem; border-radius: 0.875rem; font-size: 1rem;">
+                <Globe :size="20" /> GitHub 仓库
               </a>
-              <a href="https://github.com/Nostalgia546/Antigravity-Booster/releases" target="_blank" class="btn btn-ghost" style="border: 1px solid var(--border); text-decoration: none; display: flex; align-items: center; gap: 0.5rem; padding: 0.75rem 1.5rem; border-radius: 0.75rem;">
-                下载更新
+              <a href="https://github.com/Nostalgia546/Antigravity-Booster/releases" target="_blank" class="btn btn-ghost" style="border: 1px solid var(--border); text-decoration: none; display: flex; align-items: center; gap: 0.75rem; padding: 1rem 2.5rem; border-radius: 0.875rem; font-size: 1rem;">
+                <Download :size="20" /> 下载更新
               </a>
             </div>
 
-            <div style="padding-top: 2.5rem; border-top: 1px solid var(--border); font-size: 0.8rem; color: var(--text-secondary); display: flex; justify-content: center; align-items: center; gap: 1.5rem;">
+            <button class="btn btn-ghost" style="font-size: 0.8rem; opacity: 0.7;" @click="showLogModal = true">
+                <Activity :size="14" style="margin-right: 0.5rem;" /> 查看诊断日志
+            </button>
+
+            <div style="padding-top: 3rem; opacity: 0.5; font-size: 0.875rem; color: var(--text-secondary); display: flex; justify-content: center; align-items: center; gap: 2rem;">
               <span>&copy; 2026 Nostalgia546</span>
-              <span style="color: var(--border);">|</span>
+              <span style="width: 4px; height: 4px; background: var(--text-secondary); border-radius: 50%;"></span>
               <span>Licensed under GPL-3.0</span>
             </div>
-          </div>
         </div>
       </div>
 
@@ -760,6 +930,33 @@ onMounted(async () => {
             </div>
             <button class="btn btn-primary" style="padding: 0.5rem 1rem;" :disabled="isLoggingIn">
               {{ isLoggingIn ? '授权中...' : '开始登录' }}
+            </button>
+          </div>
+
+          <!-- One-click Import from Editor -->
+          <div class="card" 
+               :style="{ 
+                 display: 'flex', 
+                 alignItems: 'center', 
+                 gap: '1.5rem', 
+                 cursor: isImportingFromEditor ? 'not-allowed' : 'pointer',
+                 opacity: isImportingFromEditor ? 0.7 : 1,
+                 borderColor: isImportingFromEditor ? 'var(--accent)' : 'var(--border)'
+               }" 
+               @click="handleImportFromAntigravity">
+            <div style="background: rgba(16, 185, 129, 0.1); padding: 1rem; border-radius: 1rem;">
+              <Download :size="32" color="var(--success)" />
+            </div>
+            <div style="flex: 1;">
+              <h3 style="margin-bottom: 0.25rem;">
+                {{ isImportingFromEditor ? '正在同步...' : '从 Antigravity 导入' }}
+              </h3>
+              <p style="font-size: 0.75rem; color: var(--text-secondary);">
+                直接从编辑器中提取当前登录的账号信息。
+              </p>
+            </div>
+            <button class="btn" style="background: var(--success); color: white; padding: 0.5rem 1rem;" :disabled="isImportingFromEditor">
+              {{ isImportingFromEditor ? '请稍候...' : '立即导入' }}
             </button>
           </div>
 
@@ -828,5 +1025,69 @@ onMounted(async () => {
         </button>
       </div>
     </div>
+  </div>
+
+  <!-- Custom Restart Confirmation Dialog -->
+  <div v-if="showRestartConfirm" class="modal-overlay" @click="showRestartConfirm = false">
+    <div class="modal-content" @click.stop>
+      <div class="modal-header">
+        <RefreshCw :size="48" color="var(--accent)" style="margin-bottom: 1rem;" />
+        <h2 style="margin: 0; font-size: 1.5rem;">
+            {{ restartConfirmType === 'after_install' ? '安装成功' : '重启 Antigravity' }}
+        </h2>
+      </div>
+      
+      <div class="modal-body">
+        <p style="font-size: 1.125rem; margin-bottom: 1.5rem; color: var(--text-primary); text-align: center;">
+          {{ restartConfirmType === 'after_install' ? '浏览器插件已安装成功！' : '确定要重启 Antigravity 吗？' }}
+        </p>
+        
+        <div style="background: var(--surface-hover); padding: 1.25rem; border-radius: 0.75rem; margin-bottom: 1.5rem;">
+          <p style="font-size: 0.875rem; color: var(--text-secondary); line-height: 1.6;">
+            {{ restartConfirmType === 'after_install' 
+                ? '为了使插件功能生效，我们需要重新启动编辑器环境。这可能会短暂中断当前的编辑进程。' 
+                : '重新启动将刷新所有编辑器连接并应用最新的配置。请确保您的工作已保存。' 
+            }}
+          </p>
+        </div>
+        
+        <div style="background: rgba(99, 102, 241, 0.1); border-left: 3px solid var(--accent); padding: 1rem; border-radius: 0.5rem; display: flex; align-items: center; gap: 0.75rem;">
+          <Info :size="18" color="var(--accent)" />
+          <p style="font-size: 0.875rem; color: var(--text-primary); margin: 0;">
+            重启过程通常仅需几秒钟。
+          </p>
+        </div>
+      </div>
+      
+      <div class="modal-footer">
+        <button class="btn btn-ghost" @click="showRestartConfirm = false" style="flex: 1; border: 1px solid var(--border);">
+          稍后再说
+        </button>
+        <button class="btn btn-primary" @click="confirmRestart" style="flex: 1; font-weight: 600;">
+          立即重启
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Diagnostic Log Modal -->
+  <div v-if="showLogModal" class="modal-overlay" @click="showLogModal = false">
+      <div class="modal-content" style="max-width: 800px; width: 90vw;" @click.stop>
+          <div class="modal-header">
+              <Activity :size="32" color="var(--accent)" />
+              <h2 style="margin: 0; font-size: 1.25rem;">诊断日志</h2>
+          </div>
+          <div class="modal-body">
+              <div style="background: var(--surface-hover); color: var(--text-primary); padding: 1rem; border-radius: 0.5rem; font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; max-height: 400px; overflow-y: auto; text-align: left;">
+                  <div v-for="(log, idx) in store.logs" :key="idx" style="margin-bottom: 0.25rem;">
+                      {{ log }}
+                  </div>
+                  <div v-if="store.logs.length === 0" style="opacity: 0.5;">暂无诊断数据。点击“账号管理”中的任意切换或刷新操作将生成日志。</div>
+              </div>
+          </div>
+          <div class="modal-footer">
+              <button class="btn btn-primary" @click="showLogModal = false" style="width: 100%;">确认</button>
+          </div>
+      </div>
   </div>
 </template>

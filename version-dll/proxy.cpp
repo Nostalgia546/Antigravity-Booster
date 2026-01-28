@@ -5,13 +5,93 @@
 #include <sstream>
 #include <vector>
 #include <algorithm>
+#include <fstream>
 
 static ProxyConfig g_proxyConfig = { "", 0, false, "http", "proxy", 5000 };
+static FILETIME g_lastConfigTime = { 0 };
+static std::wstring g_configPath;
 LPFN_MY_CONNECTEX TrueConnectEx = NULL; 
 
 // Logging disabled for performance
 void Log(const std::string& msg) {
     // No-op: logging disabled
+}
+
+// 获取 DLL 所在目录并构造配置文件路径
+void UpdateConfigPath() {
+    wchar_t path[MAX_PATH];
+    HMODULE hModule = NULL;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       (LPCWSTR)&UpdateConfigPath, &hModule);
+    GetModuleFileNameW(hModule, path, MAX_PATH);
+    std::wstring s = path;
+    size_t lastBackslash = s.find_last_of(L"\\/");
+    if (lastBackslash != std::wstring::npos) {
+        g_configPath = s.substr(0, lastBackslash) + L"\\proxy_config.json";
+    }
+}
+
+// 极简 JSON 解析辅助函数（仅用于读取几个关键字段）
+std::string ExtractJsonValue(const std::string& json, const std::string& key) {
+    size_t pos = json.find("\"" + key + "\"");
+    if (pos == std::string::npos) return "";
+    
+    pos = json.find(":", pos);
+    if (pos == std::string::npos) return "";
+    
+    size_t start = json.find_first_not_of(" \t\n\r\"", pos + 1);
+    if (start == std::string::npos) return "";
+    
+    size_t end;
+    if (json[start-1] == '\"') {
+        end = json.find("\"", start);
+    } else {
+        end = json.find_first_of(",} \t\n\r", start);
+    }
+    
+    if (end == std::string::npos) return json.substr(start);
+    return json.substr(start, end - start);
+}
+
+// 检查并重新加载配置，返回是否成功读取到文件
+bool ReloadConfigIfChanged() {
+    if (g_configPath.empty()) UpdateConfigPath();
+
+    WIN32_FILE_ATTRIBUTE_DATA attr;
+    if (GetFileAttributesExW(g_configPath.c_str(), GetFileExInfoStandard, &attr)) {
+        if (CompareFileTime(&attr.ftLastWriteTime, &g_lastConfigTime) != 0) {
+            std::ifstream f(g_configPath);
+            if (f.is_open()) {
+                std::stringstream buffer;
+                buffer << f.rdbuf();
+                std::string content = buffer.str();
+                
+                // 解析 enabled
+                std::string enabledStr = ExtractJsonValue(content, "enabled");
+                g_proxyConfig.enabled = (enabledStr == "true");
+                
+                // 解析 host/port
+                g_proxyConfig.host = ExtractJsonValue(content, "host");
+                std::string portStr = ExtractJsonValue(content, "port");
+                if (!portStr.empty()) g_proxyConfig.port = std::stoi(portStr);
+                
+                // 解析 type
+                g_proxyConfig.type = ExtractJsonValue(content, "type");
+                if (g_proxyConfig.type.empty()) g_proxyConfig.type = "http";
+                
+                // 解析 ipv6_mode
+                g_proxyConfig.ipv6_mode = ExtractJsonValue(content, "ipv6_mode");
+                if (g_proxyConfig.ipv6_mode.empty()) g_proxyConfig.ipv6_mode = "block";
+
+                g_lastConfigTime = attr.ftLastWriteTime;
+            }
+        }
+        return true;
+    } else {
+        // 如果文件不存在，默认禁用且不使用 g_proxyConfig 里的值
+        // 但这里我们不强制置为 false，而是由调用方决定
+        return false;
+    }
 }
 
 // Global cleaner for proxy strings like "http=127.0.0.1:7890;https=127.0.0.1:7890"
@@ -51,11 +131,24 @@ bool RobustParseProxy(const std::wstring& raw, ProxyConfig& config) {
 
 bool InitializeProxy() {
     Log("--- Proxy Engine Reloaded ---");
+    // 优先尝试从本地配置文件加载
+    if (ReloadConfigIfChanged()) {
+        // 如果有配置文件，必须绝对服从配置文件的 enabled 状态
+        // 哪怕是 false，也不要继续往下走去检测系统代理
+        if (g_proxyConfig.enabled) {
+             Log("Active Proxy Config (from JSON): " + g_proxyConfig.host + ":" + std::to_string(g_proxyConfig.port));
+        } else {
+             Log("Proxy Disabled (by JSON config)");
+        }
+        return g_proxyConfig.enabled;
+    }
+
+    // 回退方案：只有 JSON 文件不存在时，才尝试系统代理
     WINHTTP_CURRENT_USER_IE_PROXY_CONFIG cfg = { 0 };
     if (WinHttpGetIEProxyConfigForCurrentUser(&cfg)) {
         if (cfg.lpszProxy) {
             if (RobustParseProxy(cfg.lpszProxy, g_proxyConfig)) {
-                Log("Active Proxy Config: " + g_proxyConfig.host + ":" + std::to_string(g_proxyConfig.port));
+                Log("Active Proxy Config (Auto-Detected): " + g_proxyConfig.host + ":" + std::to_string(g_proxyConfig.port));
             }
             GlobalFree(cfg.lpszProxy);
         }
@@ -68,6 +161,7 @@ void CleanupProxy() {
 }
 
 ProxyConfig GetProxyConfig() {
+    ReloadConfigIfChanged(); // 确保返回的是最新状态
     return g_proxyConfig;
 }
 
@@ -162,6 +256,7 @@ bool HttpConnectHandshake(SOCKET s, const std::string& host, int port) {
 
 int ProxyConnect(SOCKET s, const sockaddr* name, int namelen, 
                  int (WSAAPI* originalConnect)(SOCKET, const sockaddr*, int)) {
+    ReloadConfigIfChanged(); // 实时检查配置更新
     if (!g_proxyConfig.enabled) return originalConnect(s, name, namelen);
     
     char addrStr[64] = { 0 };

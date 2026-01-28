@@ -1,4 +1,4 @@
-use axum::{extract::Query, response::Html, routing::get, Router};
+use axum::{extract::Query, response::Html, Router};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -288,8 +288,7 @@ pub async fn import_backup(app: tauri::AppHandle) -> Result<Vec<Account>, String
     if let Ok(Some(path)) = rx.await {
         let content = fs::read_to_string(path.to_string()).map_err(|e| e.to_string())?;
         let imported: Vec<Account> = serde_json::from_str(&content).map_err(|e| e.to_string())?;
-        
-        let mut existing = load_accounts(&app);
+        let existing = load_accounts(&app);
         
         // Use a HashMap to deduplicate by email
         let mut account_map: HashMap<String, Account> = HashMap::new();
