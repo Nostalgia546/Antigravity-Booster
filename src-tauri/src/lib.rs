@@ -435,31 +435,26 @@ async fn install_assistant_extension(app: AppHandle) -> Result<String, String> {
     println!("[Extension] Starting installation...");
     
     // 1. 确定 VSIX 源文件路径 (我们在 resources 目录里)
-    let resource_path = app.path().resource_dir().map_err(|e| e.to_string())?
-        .join("antigravity-booster-helper.vsix");
-        
-    // 开发环境下可能还没有打包进去，这里做一个 fallback (假设在源码根目录)
-    let vsix_path = if resource_path.exists() {
-        println!("[Extension] Found VSIX in resources: {:?}", resource_path);
-        resource_path
-    } else {
-        println!("[Extension] VSIX not in resources, checking dev paths...");
-        // Fallback for dev environment: try to build it on the fly or look in root
-        let root_vsix = std::path::PathBuf::from("antigravity-booster-helper.vsix");
-        if root_vsix.exists() {
-             println!("[Extension] Found VSIX in root: {:?}", root_vsix);
-             root_vsix
-        } else {
-            // Last resort: try one level up in src-tauri/resources
-            let up_vsix = std::path::PathBuf::from("resources/antigravity-booster-helper.vsix");
-            if up_vsix.exists() {
-                println!("[Extension] Found VSIX in src-tauri/resources: {:?}", up_vsix);
-                up_vsix
-            } else {
-                return Err("找不到插件安装包 (vsix)。请确保已执行打包流程。".to_string());
+    let possible_paths = vec![
+        app.path().resource_dir().ok().map(|p| p.join("resources/antigravity-booster-helper.vsix")),
+        app.path().resource_dir().ok().map(|p| p.join("antigravity-booster-helper.vsix")),
+        Some(std::path::PathBuf::from("src-tauri/resources/antigravity-booster-helper.vsix")),
+        Some(std::path::PathBuf::from("resources/antigravity-booster-helper.vsix")),
+        Some(std::path::PathBuf::from("antigravity-booster-helper.vsix")),
+    ];
+
+    let mut vsix_path = None;
+    for path_opt in possible_paths {
+        if let Some(path) = path_opt {
+            if path.exists() {
+                vsix_path = Some(path);
+                break;
             }
         }
-    };
+    }
+
+    let vsix_path = vsix_path.ok_or_else(|| "找不到插件安装包 (vsix)。请确保已执行打包流程。".to_string())?;
+    println!("[Extension] Found VSIX at: {:?}", vsix_path);
 
     // 2. 找到 Antigravity CLI
     let ag_dir = get_antigravity_dir(&app).ok_or("未找到 Antigravity 安装目录")?;

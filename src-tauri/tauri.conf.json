@@ -27,7 +27,8 @@
     "active": true,
     "targets": "all",
     "resources": [
-      "resources/version.dll"
+      "resources/version.dll",
+      "resources/antigravity-booster-helper.vsix"
     ],
     "icon": [
       "icons/32x32.png",

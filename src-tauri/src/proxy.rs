@@ -196,6 +196,7 @@ pub fn enable_system_proxy(app: &tauri::AppHandle) -> Result<String, String> {
     // 2. 这里的关键：找到资源里的最新 DLL
     let possible_paths = vec![
         app.path().resource_dir().ok().map(|p| p.join("version.dll")),
+        app.path().resource_dir().ok().map(|p| p.join("resources/version.dll")),
         Some(std::path::PathBuf::from("src-tauri/resources/version.dll")),
         Some(std::path::PathBuf::from("resources/version.dll")),
     ];
@@ -264,6 +265,7 @@ pub fn ensure_dll_compatibility(app: &tauri::AppHandle) {
 
     // 1. 查找资源里的最新 DLL
     let possible_paths = vec![
+        app.path().resource_dir().ok().map(|p| p.join("resources/version.dll")),
         app.path().resource_dir().ok().map(|p| p.join("version.dll")),
         Some(std::path::PathBuf::from("src-tauri/resources/version.dll")),
         Some(std::path::PathBuf::from("resources/version.dll")),
