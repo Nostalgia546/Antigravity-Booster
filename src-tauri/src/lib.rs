@@ -112,7 +112,13 @@ fn switch_account(app: AppHandle, id: String) -> Result<String, String> {
     // Prepare variables for injection
     let (final_access, final_refresh, final_expiry) = if let Some(td) = found_token_data {
         // Full OAuth data available
-        (td.access_token, td.refresh_token, td.expires_at)
+        // 修复: 如果 refresh_token 为空(从 Antigravity 导入的账号),使用 access_token 作为 fallback
+        let refresh = if td.refresh_token.is_empty() {
+            td.access_token.clone()
+        } else {
+            td.refresh_token
+        };
+        (td.access_token, refresh, td.expires_at)
     } else {
         // Fallback: Use legacy token field (likely an access token from auto-import)
         let acc = &accounts[matching_account_index.unwrap()];
@@ -694,6 +700,7 @@ async fn reconcile_active_session(app: AppHandle) -> Result<String, String> {
                         let (key, val) = r;
                         let mut token = String::new();
                         
+                        // 在检测当前登录时,优先提取 access token (ya29.),因为需要用它来验证身份
                         if val.starts_with("ya29.") {
                             token = val;
                         } else if let Ok(decoded_vec) = general_purpose::STANDARD.decode(&val) {
@@ -980,17 +987,42 @@ async fn import_account_from_antigravity(app: AppHandle) -> Result<Account, Stri
     // 3. 逐个尝试验证，直到找到活的
     let mut verified_info = None;
     let mut working_token = String::new();
+    let mut working_refresh_token = String::new();
 
     for token in candidates {
         log_event(&app, &format!("[Import] Testing token prefix: {}...", &token[..10.min(token.len())]));
-        match oauth::get_user_info(&token, proxy_url.clone()).await {
+        
+        // 判断是 refresh token 还是 access token
+        let (access_token_to_test, is_refresh) = if token.starts_with("1//") {
+            // 这是 refresh token,需要先换取 access token
+            log_event(&app, "[Import] Detected refresh token, exchanging for access token...");
+            match oauth::refresh_access_token(&token, proxy_url.clone()).await {
+                Ok(at) => {
+                    log_event(&app, "[Import] Successfully obtained access token from refresh token");
+                    (at, true)
+                },
+                Err(e) => {
+                    log_event(&app, &format!("[Import] Failed to refresh token: {}, trying next...", e));
+                    continue;
+                }
+            }
+        } else {
+            // 这是 access token,直接使用
+            (token.clone(), false)
+        };
+        
+        // 用 access token 验证身份
+        match oauth::get_user_info(&access_token_to_test, proxy_url.clone()).await {
             Ok(info) => {
                 verified_info = Some(info);
-                working_token = token;
+                working_token = access_token_to_test;
+                if is_refresh {
+                    working_refresh_token = token; // 保存原始的 refresh token
+                }
                 break; // 找到了活的，立即退出循环
             },
             Err(e) => {
-                log_event(&app, &format!("[Import] This token is invalid (401/Network Error), trying next... Error: {}", e));
+                log_event(&app, &format!("[Import] Token validation failed: {}, trying next...", e));
             }
         }
     }
@@ -1019,10 +1051,16 @@ async fn import_account_from_antigravity(app: AppHandle) -> Result<Account, Stri
     for acc in &mut accounts {
         if acc.email.to_lowercase() == email {
             log_event(&app, "[Import] Account already exists. Updating token and activating...");
-            acc.token = working_token.clone();
+            // 如果有 refresh token,优先保存 refresh token;否则保存 access token
+            let token_to_save = if !working_refresh_token.is_empty() {
+                working_refresh_token.clone()
+            } else {
+                working_token.clone()
+            };
+            acc.token = token_to_save.clone();
             acc.token_data = Some(TokenData {
                 access_token: working_token.clone(),
-                refresh_token: "".to_string(),
+                refresh_token: working_refresh_token.clone(),
                 expires_at: chrono::Utc::now().timestamp() + 3500,
             });
             acc.is_active = true;
@@ -1034,14 +1072,20 @@ async fn import_account_from_antigravity(app: AppHandle) -> Result<Account, Stri
 
     if is_new {
         log_event(&app, "[Import] Creating new account record...");
+        // 如果有 refresh token,优先保存 refresh token;否则保存 access token
+        let token_to_save = if !working_refresh_token.is_empty() {
+            working_refresh_token.clone()
+        } else {
+            working_token.clone()
+        };
         let new_acc = Account {
             id: uuid::Uuid::new_v4().to_string(),
             name: info.name.clone().unwrap_or_else(|| info.email.clone()),
             email: info.email.clone(),
-            token: working_token.clone(),
+            token: token_to_save,
             token_data: Some(TokenData {
                 access_token: working_token,
-                refresh_token: "".to_string(),
+                refresh_token: working_refresh_token,
                 expires_at: chrono::Utc::now().timestamp() + 3500,
             }),
             account_type: "Gemini".to_string(),
@@ -1086,11 +1130,20 @@ async fn find_all_tokens_in_editor(app: &AppHandle) -> Vec<String> {
                 let mut rows = stmt.query_map([], |row| row.get::<usize, String>(0)).ok().unwrap();
                 while let Some(Ok(val)) = rows.next() {
                     let mut token = String::new();
-                    if val.starts_with("ya29.") {
+                    // 优先提取 refresh token (1//),其次提取 access token (ya29.)
+                    if val.starts_with("1//") {
+                        token = val;
+                    } else if val.starts_with("ya29.") {
                         token = val;
                     } else if let Ok(decoded_vec) = general_purpose::STANDARD.decode(&val) {
                         let text = String::from_utf8_lossy(&decoded_vec);
-                        if let Some(start) = text.find("ya29.") {
+                        // 先找 refresh token
+                        if let Some(start) = text.find("1//") {
+                            let substr = &text[start..];
+                            let end = substr.find(|c: char| !c.is_ascii_alphanumeric() && c != '/' && c != '.' && c != '_' && c != '-').unwrap_or(substr.len());
+                            token = substr[0..end].to_string();
+                        } else if let Some(start) = text.find("ya29.") {
+                            // 如果没有 refresh token,再找 access token
                             let substr = &text[start..];
                             let end = substr.find(|c: char| !c.is_ascii_alphanumeric() && c != '.' && c != '_' && c != '-').unwrap_or(substr.len());
                             token = substr[0..end].to_string();
