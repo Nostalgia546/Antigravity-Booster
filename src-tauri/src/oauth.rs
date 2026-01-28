@@ -203,7 +203,7 @@ pub async fn start_oauth_login(app: tauri::AppHandle) -> Result<Account, String>
             let (token_data, user_info) = exchange_code(&code, &redirect_uri).await?;
             
             // Generate stable ID from email to prevent duplicates
-            let account_id = uuid::Uuid::new_v4().to_string();
+            let account_id = user_info.email.to_lowercase();
             use crate::storage::TokenData;
 
             // Calculate absolute expiry time

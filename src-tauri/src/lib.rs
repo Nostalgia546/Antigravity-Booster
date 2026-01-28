@@ -1135,7 +1135,7 @@ async fn import_account_from_antigravity(app: AppHandle) -> Result<Account, Stri
             working_token.clone()
         };
         let new_acc = Account {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: email.clone(),
             name: info.name.clone().unwrap_or_else(|| info.email.clone()),
             email: info.email.clone(),
             token: token_to_save,

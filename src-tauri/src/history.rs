@@ -19,6 +19,9 @@ pub struct QuotaHistoryPoint {
     /// 账户模型 ID -> 绝对重置时间戳 (用于精准判定是否发生了重置)
     #[serde(default)]
     pub reset_at: HashMap<String, i64>,
+    /// 账户 ID -> 账户名称 (用于即使账户被删除后也能显示名称)
+    #[serde(default)]
+    pub account_names: HashMap<String, String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -93,8 +96,10 @@ pub fn save_history(app: &tauri::AppHandle, history: &[QuotaHistoryPoint]) -> Re
 pub fn record_quota_point(app: &tauri::AppHandle) -> Result<(), String> {
     let accounts = crate::storage::load_accounts(app);
     let mut usage_map = HashMap::new();
+    let mut account_names = HashMap::new();
     
     for acc in &accounts {
+        account_names.insert(acc.id.clone(), acc.name.clone());
         if let Some(quota) = &acc.quota {
             for model in &quota.models {
                 let key = format!("{}:{}", acc.id, model.name);
@@ -122,6 +127,7 @@ pub fn record_quota_point(app: &tauri::AppHandle) -> Result<(), String> {
         timestamp: now,
         usage: usage_map,
         reset_at,
+        account_names,
     };
     
     let mut history = load_history(app);
@@ -163,6 +169,13 @@ pub fn calculate_usage_buckets(
     let mut account_names = HashMap::new();
     for acc in &accounts {
         account_names.insert(acc.id.clone(), acc.name.clone());
+    }
+    
+    // 从历史记录中补全已删除账号的名称
+    for p in &history {
+        for (id, name) in &p.account_names {
+            account_names.entry(id.clone()).or_insert_with(|| name.clone());
+        }
     }
     
     let now = chrono::Utc::now().timestamp();
