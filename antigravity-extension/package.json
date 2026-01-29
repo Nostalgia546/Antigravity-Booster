@@ -29,7 +29,7 @@
             "antigravity-booster-container": [
                 {
                     "type": "webview",
-                    "id": "antigravity.booster.statusView",
+                    "id": "antigravityBoosterView",
                     "name": "Status",
                     "icon": "icon.png"
                 }
@@ -38,7 +38,7 @@
         "configuration": {
             "title": "Antigravity Booster",
             "properties": {
-                "antigravity.automation.autoAccept": {
+                "tfa.system.autoAccept": {
                     "type": "boolean",
                     "default": false,
                     "description": "Automatically accept agent suggested edits and terminal commands."
@@ -47,11 +47,11 @@
         },
         "commands": [
             {
-                "command": "antigravity.booster.toggleAutoAccept",
+                "command": "antigravityBooster.toggleAutoAccept",
                 "title": "Toggle Auto-Accept"
             },
             {
-                "command": "antigravity.booster.showDetails",
+                "command": "antigravityBooster.showDetails",
                 "title": "Show Details"
             }
         ]
