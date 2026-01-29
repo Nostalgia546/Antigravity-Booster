@@ -145,6 +145,51 @@ pub fn record_quota_point(app: &tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Consume and merge the buffer file recorded by the VS Code extension
+pub fn consume_plugin_buffer(app: &tauri::AppHandle) -> Result<(), String> {
+    let mut buffer_path = crate::storage::get_app_dir(app);
+    buffer_path.push("quota_buffer.json");
+    
+    if !buffer_path.exists() {
+        return Ok(());
+    }
+    
+    let content = fs::read_to_string(&buffer_path).map_err(|e| e.to_string())?;
+    let buffer_points: Vec<QuotaHistoryPoint> = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    
+    if buffer_points.is_empty() {
+        let _ = fs::remove_file(buffer_path);
+        return Ok(());
+    }
+    
+    let mut history = load_history(app);
+    let mut added_count = 0;
+    
+    for bp in buffer_points {
+        // Only add if not already present (based on timestamp)
+        if !history.iter().any(|p| p.timestamp == bp.timestamp) {
+            history.push(bp);
+            added_count += 1;
+        }
+    }
+    
+    if added_count > 0 {
+        // Sort by timestamp just in case
+        history.sort_by_key(|p| p.timestamp);
+        
+        // Keep only recent history
+        let cutoff = chrono::Utc::now().timestamp() - MAX_HISTORY_HOURS * 3600;
+        history.retain(|p| p.timestamp > cutoff);
+        
+        save_history(app, &history)?;
+        println!("Merged {} points from plugin buffer.", added_count);
+    }
+    
+    // Clean up
+    let _ = fs::remove_file(buffer_path);
+    Ok(())
+}
+
 /// Get model color based on name
 fn get_model_color(model_name: &str) -> String {
     let lower = model_name.to_lowercase();
@@ -203,10 +248,6 @@ pub fn calculate_usage_buckets(
     // Key -> bucket_index -> amount
     let mut distribution: HashMap<String, Vec<f64>> = HashMap::new();
     
-    // 辅助结构：记录每个桶在其时间范围内是否存在"隐式使用中"的历史点
-    // Key -> bucket_index -> is_implicitly_in_use
-    let mut implicit_use_flags: HashMap<String, Vec<bool>> = HashMap::new();
-
     // Process intervals between adjacent history points
     for i in 0..history.len().saturating_sub(1) {
         let p1 = &history[i];
@@ -228,18 +269,9 @@ pub fn calculate_usage_buckets(
                     (100.0 - val2).max(0.0)
                 } else {
                     // 正常情况：消耗量 = 之前的余量 - 现在的余量
-                    // 注意：如果余量不降反增且没有显式重置 (可能是 API 抖动)，记为 0
                     (val1 - val2).max(0.0)
                 };
                 
-                // === 核心新增：检测"隐式使用中"状态 ===
-                // 条件：余量 ≥ 99.9% 且 距离下次重置 < 299分钟（4小时59分）
-                // 这意味着用户正在使用，但额度变化还未体现出来
-                let is_p1_implicit_use = if let Some(&reset_ts) = r1 {
-                    let remaining_secs = reset_ts - t1;
-                    val1 >= 99.9 && remaining_secs > 0 && remaining_secs < 299 * 60
-                } else { false };
-
                 // 将该区间产生的消耗量分配到对应的桶中
                 let total_duration = (t2 - t1) as f64;
                 
@@ -257,40 +289,12 @@ pub fn calculate_usage_buckets(
                         
                         distribution.entry(key.clone())
                             .or_insert_with(|| vec![0.0; bucket_count])[b_idx] += amount;
-                        
-                        // 记录隐式使用标志
-                        if is_p1_implicit_use {
-                            implicit_use_flags.entry(key.clone())
-                                .or_insert_with(|| vec![false; bucket_count])[b_idx] = true;
-                        }
                     }
                 }
             }
         }
     }
     
-    // === 核心新增：两步回溯均匀化后处理 ===
-    // 对于每个 key，如果发现 [≈0消耗] → [有消耗] 的模式，
-    // 且前一个桶被标记为"隐式使用中"，则将消耗均匀分配
-    for (key, bucket_values) in distribution.iter_mut() {
-        let flags = implicit_use_flags.get(key);
-        
-        for b_idx in 1..bucket_count {
-            let current = bucket_values[b_idx];
-            let prev = bucket_values[b_idx - 1];
-            
-            // 触发条件：当前桶有显著消耗（>1%），前一桶几乎没有（<0.5%），且前一桶被标记为隐式使用
-            let prev_is_implicit = flags.map(|f| f[b_idx - 1]).unwrap_or(false);
-            
-            if current > 1.0 && prev < 0.5 && prev_is_implicit {
-                // 均匀分配：将当前桶的一半移动到前一桶
-                let half = current / 2.0;
-                bucket_values[b_idx] = half;
-                bucket_values[b_idx - 1] += half;
-            }
-        }
-    }
-
     // Convert distribution back to bucket items
     for (key, bucket_values) in distribution {
         let parts: Vec<&str> = key.split(':').collect();

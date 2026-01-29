@@ -19,7 +19,8 @@ import {
   Maximize2,
   Minimize2,
   X,
-  Puzzle
+  Puzzle,
+  LineChart
 } from "lucide-vue-next";
 import { useAppStore } from "./stores/app";
 import { invoke } from "@tauri-apps/api/core";
@@ -86,10 +87,10 @@ const toggleProxy = async () => {
   }
 };
 
-const refreshQuota = async (id: string) => {
+const refreshQuota = async (id: string, recordHistory: boolean = false) => {
   try {
     store.addLog("Refreshing account usage...");
-    await invoke("pulse_check_quota", { id });
+    await invoke("pulse_check_quota", { id, recordHistory });
     await syncData();
     store.addLog("Usage data updated.");
   } catch (err) {
@@ -216,8 +217,8 @@ const switchAccount = async (id: string) => {
     store.addLog("正在切换账号...");
     const res = await invoke("switch_account", { id });
     await syncData();
-    // Auto refresh usage on switch (Force await)
-    await refreshQuota(id);
+    // 切换后快照：记录新账号的初始准入状态
+    await refreshQuota(id, true);
     store.addLog(`已登录账户: ${store.activeAccount?.name}`);
     if (res) {
       store.addLog(`同步日志: ${res}`);
@@ -335,9 +336,9 @@ const handleAddAccount = async () => {
     store.addLog("启动 OAuth 登录流程...");
     const acc = await invoke("start_oauth_login");
     await syncData();
-    // Force refresh quota for the new account
+    // 新账号加入快照：记录初始状态
     if (acc && (acc as any).id) {
-       await refreshQuota((acc as any).id);
+       await refreshQuota((acc as any).id, true);
     }
     store.addLog(`登录成功: ${(acc as any).name}`);
     activeTab.value = 'accounts'; // Auto switch back
@@ -394,10 +395,18 @@ const refreshAllQuotas = async () => {
   for (const acc of store.accounts) {
     try {
       store.addLog(`[${acc.name}] 正在获取数据...`);
-      await invoke("pulse_check_quota", { id: acc.id });
+      await invoke("pulse_check_quota", { id: acc.id, recordHistory: false });
     } catch (e) {
       store.addLog(`Error ${acc.name}: ${e}`);
     }
+  }
+
+  // 批量刷新完成后，记录一次全量快照
+  try {
+    await invoke("record_history_snapshot");
+    store.addLog("已记录全量快照。");
+  } catch (e) {
+    console.error("Failed to record snapshot:", e);
   }
 
   await syncData();
@@ -448,7 +457,7 @@ const handleImportFromAntigravity = async () => {
         const acc = await invoke("import_account_from_antigravity");
         await syncData();
         if (acc && (acc as any).id) {
-            await refreshQuota((acc as any).id);
+            await refreshQuota((acc as any).id, true);
         }
         store.addLog(`导入成功: ${(acc as any).name}`);
         activeTab.value = 'accounts';
@@ -724,31 +733,38 @@ const handleImportFromAntigravity = async () => {
           </p>
           
           <div style="display: flex; flex-direction: column; gap: 1rem; align-items: center; margin-top: 2.5rem; margin-bottom: 3rem;">
-              <div v-if="extStatus === 'installed'" class="badge badge-success" style="padding: 0.6rem 1.25rem; font-size: 0.9rem; border-radius: 2rem;">
+              <div v-if="extStatus === 'installed'" class="badge badge-success" style="padding: 0.5rem 1.25rem; font-size: 0.9rem; border-radius: 2rem; line-height: 1.2; display: inline-flex; align-items: center;">
                   已安装 v{{ extInfo?.installed_version }}
               </div>
-              <div v-else-if="extStatus === 'outdated'" class="badge badge-info" style="padding: 0.6rem 1.25rem; font-size: 0.9rem; border-radius: 2rem;">
+              <div v-else-if="extStatus === 'outdated'" class="badge badge-info" style="padding: 0.5rem 1.25rem; font-size: 0.9rem; border-radius: 2rem; line-height: 1.2; display: inline-flex; align-items: center;">
                   有更新: v{{ extInfo?.installed_version }} → v{{ extInfo?.latest_version }}
               </div>
-              <div v-else class="badge badge-warning" style="padding: 0.6rem 1.25rem; font-size: 0.9rem; border-radius: 2rem;">
+              <div v-else class="badge badge-warning" style="padding: 0.5rem 1.25rem; font-size: 0.9rem; border-radius: 2rem; line-height: 1.2; display: inline-flex; align-items: center;">
                   未检测到安装
               </div>
           </div>
 
-          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; margin-bottom: 4rem;">
-              <div style="text-align: left; padding: 1.5rem; background: var(--surface-hover); border-radius: 1rem;">
+          <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1.25rem; margin-bottom: 4rem;">
+              <div style="text-align: left; padding: 1.25rem; background: var(--surface-hover); border-radius: 1rem;">
                   <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem;">
                     <Activity :size="20" color="var(--success)" />
-                    <span style="font-weight: 700; font-size: 1rem;">状态同步</span>
+                    <span style="font-weight: 700; font-size: 0.95rem;">状态同步</span>
                   </div>
-                  <div style="font-size: 0.875rem; opacity: 0.8; line-height: 1.6;">在 Antigravity 状态栏实时显示当前账号的配额余量。</div>
+                  <div style="font-size: 0.8rem; opacity: 0.8; line-height: 1.5;">在 Antigravity 状态栏实时显示当前账号的配额余量。</div>
               </div>
-              <div style="text-align: left; padding: 1.5rem; background: var(--surface-hover); border-radius: 1rem;">
+              <div style="text-align: left; padding: 1.25rem; background: var(--surface-hover); border-radius: 1rem;">
                   <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem;">
-                    <ZapOff :size="20" color="var(--accent)" />
-                    <span style="font-weight: 700; font-size: 1rem;">自动同意</span>
+                    <CheckCircle2 :size="20" color="var(--accent)" />
+                    <span style="font-weight: 700; font-size: 0.95rem;">自动同意</span>
                   </div>
-                  <div style="font-size: 0.875rem; opacity: 0.8; line-height: 1.6;">无需手动点击，自动接受 Agent 发起的修改建议与终端请求。</div>
+                  <div style="font-size: 0.8rem; opacity: 0.8; line-height: 1.5;">无需手动点击，自动接受 Agent 发起的修改建议与终端请求。</div>
+              </div>
+              <div style="text-align: left; padding: 1.25rem; background: var(--surface-hover); border-radius: 1rem;">
+                  <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem;">
+                    <LineChart :size="20" style="color: #f59e0b;" />
+                    <span style="font-weight: 700; font-size: 0.95rem;">精准记录</span>
+                  </div>
+                  <div style="font-size: 0.8rem; opacity: 0.8; line-height: 1.5;">新增保底守护进程，即便 Booster 未启动也能确保持续记录历史用量。</div>
               </div>
           </div>
 
@@ -873,7 +889,7 @@ const handleImportFromAntigravity = async () => {
               <img src="./assets/logo.png" style="width: 120px; height: 120px; border-radius: 28px; box-shadow: 0 15px 35px rgba(0,0,0,0.15); object-fit: cover; margin: 0 auto;" />
             </div>
             <h1 style="font-size: 3rem; font-weight: 800; margin-bottom: 0.5rem; color: var(--text-primary); letter-spacing: -0.04em;">Antigravity Booster</h1>
-            <p style="color: var(--text-secondary); font-size: 1rem; margin-bottom: 3rem; font-family: 'JetBrains Mono', monospace; letter-spacing: 1px;">Version 1.4.0 (Build 20260128)</p>
+            <p style="color: var(--text-secondary); font-size: 1rem; margin-bottom: 3rem; font-family: 'JetBrains Mono', monospace; letter-spacing: 1px;">Version 1.5.0 (Build 20260130)</p>
             
             <div style="max-width: 600px; margin: 0 auto 3.5rem; line-height: 2; color: var(--text-secondary); font-size: 1.125rem;">
                 Antigravity Booster 是专门为您打造的效能增强助手。<br/>不仅解决了复杂的网络代理问题，更提供了优雅的多账号管理体验。

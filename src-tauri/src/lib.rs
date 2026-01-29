@@ -12,6 +12,7 @@ use crate::storage::{Account, load_accounts, save_accounts, load_config, TokenDa
 use crate::oauth::export_backup;
 use crate::proxy::get_antigravity_dir;
 use base64::{Engine as _, engine::general_purpose};
+use chrono::Timelike;
 
 #[tauri::command]
 fn sync_vault_entries(app: AppHandle) -> Vec<Account> {
@@ -84,6 +85,15 @@ async fn switch_account(app: AppHandle, id: String) -> Result<String, String> {
 
     // --- Phase 1: Load & Validate ---
     let mut accounts = load_accounts(&app);
+    
+    // [重要] 切换前快照：记录当前活跃账号的最终状态
+    if let Some(current_active) = accounts.iter().find(|a| a.is_active) {
+        let current_id = current_active.id.clone();
+        println!("[Switch] Recording pre-switch snapshot for: {}", current_active.name);
+        // 尝试刷新一下当前账号，确保记录的是最新的余量
+        let _ = pulse_check_quota(app.clone(), current_id, true).await;
+    }
+
     let mut matching_account_index = None;
     let mut found_token_data: Option<TokenData> = None;
 
@@ -296,6 +306,11 @@ async fn switch_account(app: AppHandle, id: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn record_history_snapshot(app: AppHandle) -> Result<(), String> {
+    crate::history::record_quota_point(&app)
+}
+
+#[tauri::command]
 fn load_booster_settings(app: AppHandle) -> BoosterConfig {
     load_config(&app)
 }
@@ -306,20 +321,19 @@ fn update_booster_settings(app: AppHandle, config: BoosterConfig) -> Result<(), 
 }
 
 #[tauri::command]
-async fn pulse_check_quota(app: AppHandle, id: String) -> Result<storage::QuotaData, String> {
+async fn pulse_check_quota(app: AppHandle, id: String, record_history: bool) -> Result<storage::QuotaData, String> {
     // 1. Load accounts
     let mut accounts = load_accounts(&app);
     let proxy_url = None;
 
-    // 2. Find index to avoid long-lived mutable borrow
+    // 2. Find index
     let acc_idx = accounts.iter().position(|a| a.id == id)
         .ok_or_else(|| "Account not found".to_string())?;
 
-    // 3. Prepare data needed for fetch (Clone small strings)
-    let (access_token, email, _current_token) = {
+    // 3. Prepare data
+    let (access_token, email) = {
         let acc = &accounts[acc_idx];
         let token_to_use = if acc.token.starts_with("1//") {
-            // Need refresh
             match oauth::refresh_access_token(&acc.token, proxy_url.clone()).await {
                 Ok(at) => at,
                 Err(e) => return Err(format!("Quota error: Token refresh failed: {}", e)),
@@ -327,17 +341,11 @@ async fn pulse_check_quota(app: AppHandle, id: String) -> Result<storage::QuotaD
         } else {
             acc.token.clone()
         };
-        (token_to_use, acc.email.clone(), acc.token.clone())
+        (token_to_use, acc.email.clone())
     };
 
-    // 4. Update the token in memory if it was refreshed? 
-    // The oauth::refresh_access_token returns a NEW access token, 
-    // but typically we don't save ephemeral access tokens back to disk unless they are permanent.
-    // For now we just use it.
-
-    // 5. Fetch Quota (Async, no borrow held)
+    // 5. Fetch Quota
     let (new_quota, detected_tier, debug_logs) = quota::fetch_account_quota_real(&access_token, &email, proxy_url).await?;
-    
     let _ = app.emit("debug-log", debug_logs);
 
     // 6. Mutate Accounts
@@ -346,20 +354,24 @@ async fn pulse_check_quota(app: AppHandle, id: String) -> Result<storage::QuotaD
         acc.quota = Some(new_quota.clone());
         if !detected_tier.is_empty() {
              acc.account_type = detected_tier;
-        } else {
-             acc.account_type = "Gemini".to_string();
         }
     }
 
-    // 7. Save to Disk (Now mutable borrow is gone)
+    // 7. Save to Disk
     save_accounts(&app, &accounts).map_err(|e| e.to_string())?;
 
-    // 8. Bridge Write
+    // 8. Bridge Write (Only if active)
     if accounts[acc_idx].is_active {
         write_quota_bridge_file(&app, &new_quota);
     }
 
-    let _ = crate::history::record_quota_point(&app);
+    if record_history {
+        let _ = crate::history::record_quota_point(&app);
+    }
+    
+    // [重要] 这里的逻辑：如果这就是 switch_account 调用的那个“切换后”刷新，
+    // record_quota_point 会把当前最新的 accounts 状态（包括新 active 的账号）存入快照
+    
     Ok(new_quota)
 }
 
@@ -521,7 +533,7 @@ async fn stop_boosting() -> Result<(), String> {
 
 // --- Extension Manager ---
 
-const LATEST_HELPER_VERSION: &str = "1.2.3";
+const LATEST_HELPER_VERSION: &str = "1.3.5";
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct ExtensionStatus {
@@ -890,6 +902,9 @@ fn is_proxy_enabled(app: AppHandle) -> Result<bool, String> {
 async fn start_auto_refresh_task(app: AppHandle) {
     use tokio::time::{sleep, Duration};
     
+    // 启动时先收割一次插件在离线期间记录的数据
+    let _ = history::consume_plugin_buffer(&app);
+
     // Immediate refresh on startup
     let mut accounts = load_accounts(&app);
     for acc in &mut accounts {
@@ -917,19 +932,28 @@ async fn start_auto_refresh_task(app: AppHandle) {
     let _ = app.emit("quota-updated", ());
     
     loop {
-        let now_ts = chrono::Utc::now().timestamp();
-        let mut next_run = now_ts + 300; // 默认 5 分钟频率
+        let now_local = chrono::Local::now();
+        let now_ts = now_local.timestamp();
         
-        // 核心改进：抢占式记录。检查是否有账号在 5 分钟内即将重置
+        // --- 核心改进：时钟对齐逻辑 ---
+        // 计算距离下一个整 5 分钟（即 mm % 5 == 0 且 ss == 0）还有多少秒
+        let current_minute = now_local.minute();
+        let current_second = now_local.second();
+        let seconds_past_5min = (current_minute % 5) * 60 + current_second;
+        let sleep_until_next_tick = 300 - seconds_past_5min;
+        
+        let mut next_run = now_ts + sleep_until_next_tick as i64;
+        let original_next_run = next_run; // 备份一下，用于判定是否发生了抢占
+        
+        // 抢占式记录逻辑保持不变
         {
             let accounts = load_accounts(&app);
             for acc in &accounts {
                 if let Some(quota) = &acc.quota {
                     for model in &quota.models {
                         if let Some(reset_ts) = model.reset_at {
-                            let pre_reset_target = reset_ts - 60; // 重置前 1 分钟
+                            let pre_reset_target = reset_ts - 30; // 重置前 30 秒
                             if pre_reset_target > now_ts && pre_reset_target < next_run {
-                                // 发现一个更紧急的重置临界点，抢占下一次运行时间
                                 next_run = pre_reset_target;
                             }
                         }
@@ -937,9 +961,24 @@ async fn start_auto_refresh_task(app: AppHandle) {
                 }
             }
         }
+        
+        // 判定是否是因为重置触发的抢占
+        let is_pre_reset_trigger = next_run < original_next_run;
 
-        let sleep_secs = (next_run - now_ts).max(5); // 确保至少睡 5 秒，防止极端情况下的死循环
+        let sleep_secs = (next_run - now_ts).max(1); // 缩短保底时间到 1s，提高整分检测精度
         sleep(Duration::from_secs(sleep_secs as u64)).await;
+
+        // 刷新时间判定
+        let now = chrono::Local::now();
+        let minute = now.minute();
+        
+        let is_30_min_tick = minute % 30 == 0;
+        let is_5_min_tick = minute % 5 == 0;
+
+        // 如果是预重置抢占触发，或者到了 5 分钟点，就执行刷新
+        if !is_5_min_tick && !is_pre_reset_trigger { 
+            continue; 
+        } 
 
         // 1. 同步真实身份
         let _ = reconcile_active_session(app.clone()).await;
@@ -952,12 +991,30 @@ async fn start_auto_refresh_task(app: AppHandle) {
             None
         };
         
-        let is_major_tick = (now_ts / 60) % 30 < 5; // 使用 loop 开头的 now_ts
-
         let mut any_fetched = false;
+        let current_ts = chrono::Utc::now().timestamp();
+
         for acc in &mut accounts {
-            // 策略：如果是活跃账号，或者到了 30 分钟的全量扫描点，或者该账号从未获取过数据
-            let should_fetch = acc.is_active || is_major_tick || acc.quota.is_none();
+            // 判定该特定账号是否快到重置点了 (30秒抢占)
+            let mut acc_near_reset = false;
+            if let Some(q) = &acc.quota {
+                for m in &q.models {
+                    if let Some(r_ts) = m.reset_at {
+                        // 窗口放大到 120 秒，确保抢占唤醒后一定能触发刷新
+                        if r_ts > current_ts && (r_ts - current_ts) < 120 {
+                            acc_near_reset = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // 策略优化：
+            // 1. 活跃账号必刷
+            // 2. 到了 30 分钟全量点必刷
+            // 3. 只有本账号快到重置点了才刷（不再因为别人快重置了就带上全家）
+            // 4. 新号没数据的必刷
+            let should_fetch = acc.is_active || is_30_min_tick || acc_near_reset || acc.quota.is_none();
             
             if should_fetch {
                 let access_token = if acc.token.starts_with("1//") {
@@ -993,12 +1050,17 @@ async fn start_auto_refresh_task(app: AppHandle) {
                 }
             }
             let _ = save_accounts(&app, &disk_accounts);
+            
+            // 决定是否记录快照
+            // 只有在 30 分钟整点、重置抢占成功、或者这是该账号第一次初始化数据时才记录
+            if is_30_min_tick || is_pre_reset_trigger {
+                let _ = history::record_quota_point(&app);
+                log_event(&app, "[Task] 30min snapshot or pre-reset recorded.");
+            }
+            
+            let _ = app.emit("quota-updated", ());
+            log_event(&app, "[Task] Minute cycle completed.");
         }
-
-        // 核心改进：每一轮都要记录 point 和广播，确保图表能够实时推移显示“当前”
-        let _ = history::record_quota_point(&app);
-        let _ = app.emit("quota-updated", ());
-        log_event(&app, "[Task] Cycle completed: Sync, refresh and history point recorded.");
     }
 }
 
@@ -1219,6 +1281,13 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            let _ = app.get_webview_window("main").map(|w| {
+                let _ = w.show();
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            });
+        }))
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--minimized"])))
         .setup(|app| {
             let app_handle = app.handle().clone();
@@ -1290,6 +1359,7 @@ pub fn run() {
             load_booster_settings,
             update_booster_settings,
             pulse_check_quota,
+            record_history_snapshot,
             start_boosting,
             stop_boosting,
             analyze_network_gate,

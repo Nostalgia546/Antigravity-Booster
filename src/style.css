@@ -308,7 +308,7 @@ body {
 
 /* Capsule Badge (Gemini Style) */
 .badge-capsule {
-    background: #ffffff;
+    background: var(--bg-app);
     border: 1px solid var(--border);
     color: var(--text-primary);
     padding: 0.25rem 0.75rem;
