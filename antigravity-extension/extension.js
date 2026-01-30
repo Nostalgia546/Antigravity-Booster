@@ -75,8 +75,9 @@ class QuotaGuardian {
         this.bufferPath = path.join(this.baseDir, 'quota_buffer.json');
         this._cachedToken = null;
         this.onDataUpdated = null;
-        // 对齐 Booster 后端 Client ID
+        // 对齐 Booster 后端 Client ID 和 Secret
         this.CLIENT_ID = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
+        this.CLIENT_SECRET = "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";
     }
 
     start() {
@@ -128,7 +129,9 @@ class QuotaGuardian {
     }
 
     async performCheck() {
-        const bridgePath = path.join(os.homedir(), 'AppData', 'Roaming', 'Antigravity Booster', 'quota_bridge.json');
+        if (outputChannel) outputChannel.appendLine(`Guardian: performCheck triggered at ${new Date().toLocaleTimeString()}`);
+
+        const bridgePath = path.join(os.homedir(), 'AppData', 'Roaming', 'com.tz.antigravity-booster', 'quota_bridge.json');
 
         // 判定主程序是否活跃：如果 bridge 文件在 60 秒内被修改过，说明 Booster 正在工作
         try {
@@ -136,47 +139,108 @@ class QuotaGuardian {
                 const stats = fs.statSync(bridgePath);
                 const lastModified = stats.mtimeMs;
                 const nowMs = Date.now();
+                const ageSeconds = Math.floor((nowMs - lastModified) / 1000);
+                if (outputChannel) outputChannel.appendLine(`Guardian: Bridge file age = ${ageSeconds}s`);
                 if (nowMs - lastModified < 60000) {
                     if (outputChannel) outputChannel.appendLine("Guardian: Booster is active (updated < 60s ago). Skipping plugin API fetch.");
                     return; // Booster 还在工作，插件不抢活，也不记录 Buffer
+                } else {
+                    if (outputChannel) outputChannel.appendLine("Guardian: Booster seems offline. Plugin will fetch API.");
                 }
+            } else {
+                if (outputChannel) outputChannel.appendLine("Guardian: Bridge file not found. Plugin will fetch API.");
             }
-        } catch (e) { }
+        } catch (e) {
+            if (outputChannel) outputChannel.appendLine(`Guardian: Error checking bridge: ${e.message}`);
+        }
 
         const activeAcc = this._loadActiveAccount();
-        if (!activeAcc) return;
+        if (!activeAcc) {
+            if (outputChannel) outputChannel.appendLine("Guardian: No active account found.");
+            return;
+        }
+        if (outputChannel) outputChannel.appendLine(`Guardian: Active account = ${activeAcc.email}`);
 
-        let tokenToUse = (this._cachedToken && this._cachedToken.email === activeAcc.email)
-            ? this._cachedToken.access_token
-            : (activeAcc.token_data ? activeAcc.token_data.access_token : activeAcc.token);
+        // 和 Booster 后端保持一致的 Token 处理逻辑
+        let accessToken = null;
 
-        if (!tokenToUse) return;
+        // 1. 优先使用缓存的 access_token
+        if (this._cachedToken && this._cachedToken.email === activeAcc.email) {
+            accessToken = this._cachedToken.access_token;
+            if (outputChannel) outputChannel.appendLine("Guardian: Using cached access token.");
+        }
+
+        // 2. 如果没有缓存，判断 acc.token 是 refresh_token 还是 access_token
+        if (!accessToken) {
+            if (activeAcc.token && activeAcc.token.startsWith('1//')) {
+                // 这是 refresh_token，需要先刷新
+                if (outputChannel) outputChannel.appendLine("Guardian: Token is refresh_token, refreshing...");
+                accessToken = await this._refreshAccessToken(activeAcc.token);
+                if (accessToken) {
+                    this._cachedToken = { email: activeAcc.email, access_token: accessToken };
+                    if (outputChannel) outputChannel.appendLine("Guardian: Token refreshed successfully.");
+                } else {
+                    if (outputChannel) outputChannel.appendLine("Guardian: Token refresh failed.");
+                    return;
+                }
+            } else if (activeAcc.token) {
+                // 这是 access_token，直接使用
+                accessToken = activeAcc.token;
+                if (outputChannel) outputChannel.appendLine("Guardian: Using direct access token.");
+            } else if (activeAcc.token_data && activeAcc.token_data.access_token) {
+                accessToken = activeAcc.token_data.access_token;
+                if (outputChannel) outputChannel.appendLine("Guardian: Using token_data.access_token.");
+            }
+        }
+
+        if (!accessToken) {
+            if (outputChannel) outputChannel.appendLine("Guardian: No token available.");
+            return;
+        }
 
         try {
             let quota;
             try {
-                quota = await this._fetchQuota(tokenToUse);
+                if (outputChannel) outputChannel.appendLine("Guardian: Fetching quota from API...");
+                quota = await this._fetchQuota(accessToken);
             } catch (err) {
-                if (err.message.includes('401') && activeAcc.token_data && activeAcc.token_data.refresh_token) {
-                    const newToken = await this._refreshAccessToken(activeAcc.token_data.refresh_token);
-                    if (newToken) {
-                        this._cachedToken = { email: activeAcc.email, access_token: newToken };
-                        quota = await this._fetchQuota(newToken);
-                    } else throw err;
-                } else throw err;
+                // 如果 401 且有 refresh_token 可用，尝试刷新
+                if (err.message.includes('401')) {
+                    const refreshToken = activeAcc.token && activeAcc.token.startsWith('1//')
+                        ? activeAcc.token
+                        : (activeAcc.token_data?.refresh_token || null);
+
+                    if (refreshToken) {
+                        if (outputChannel) outputChannel.appendLine("Guardian: Access token expired, refreshing...");
+                        const newToken = await this._refreshAccessToken(refreshToken);
+                        if (newToken) {
+                            this._cachedToken = { email: activeAcc.email, access_token: newToken };
+                            quota = await this._fetchQuota(newToken);
+                        } else {
+                            throw new Error("Token refresh failed");
+                        }
+                    } else {
+                        throw err;
+                    }
+                } else {
+                    throw err;
+                }
             }
 
             if (quota && quota.models) {
+                if (outputChannel) outputChannel.appendLine(`Guardian: API success! Got ${quota.models.length} models. Updating UI...`);
                 this._lastModels = quota.models;
                 if (this.onDataUpdated) this.onDataUpdated(quota);
                 this._recordToBuffer(activeAcc.id, activeAcc.name, quota);
             }
-        } catch (e) { }
+        } catch (e) {
+            if (outputChannel) outputChannel.appendLine(`Guardian: API error: ${e.message}`);
+        }
     }
 
     async _refreshAccessToken(refreshToken) {
         const https = require('https');
-        const data = `client_id=${this.CLIENT_ID}&refresh_token=${refreshToken}&grant_type=refresh_token`;
+        const data = `client_id=${this.CLIENT_ID}&client_secret=${this.CLIENT_SECRET}&refresh_token=${refreshToken}&grant_type=refresh_token`;
         return new Promise((resolve) => {
             const req = https.request({
                 hostname: 'oauth2.googleapis.com', path: '/token', method: 'POST',
