@@ -894,7 +894,7 @@ const handleImportFromAntigravity = async () => {
               <img src="./assets/logo.png" style="width: 120px; height: 120px; border-radius: 28px; box-shadow: 0 15px 35px rgba(0,0,0,0.15); object-fit: cover; margin: 0 auto;" />
             </div>
             <h1 style="font-size: 3rem; font-weight: 800; margin-bottom: 0.5rem; color: var(--text-primary); letter-spacing: -0.04em;">Antigravity Booster</h1>
-            <p style="color: var(--text-secondary); font-size: 1rem; margin-bottom: 3rem; font-family: 'JetBrains Mono', monospace; letter-spacing: 1px;">Version 1.5.0 (Build 20260130)</p>
+            <p style="color: var(--text-secondary); font-size: 1rem; margin-bottom: 3rem; font-family: 'JetBrains Mono', monospace; letter-spacing: 1px;">Version 1.5.1 (Build 20260130)</p>
             
             <div style="max-width: 600px; margin: 0 auto 3.5rem; line-height: 2; color: var(--text-secondary); font-size: 1.125rem;">
                 Antigravity Booster 是专门为您打造的效能增强助手。<br/>不仅解决了复杂的网络代理问题，更提供了优雅的多账号管理体验。
