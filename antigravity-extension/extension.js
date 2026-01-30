@@ -10,7 +10,7 @@ let guardianInstance;
 let webviewProviderInstance;
 
 /**
- * 自动同意服务: 完全保持原始逻辑
+ * 自动同意服务
  */
 class AutomationService {
     constructor() {
@@ -80,22 +80,69 @@ class QuotaGuardian {
     }
 
     start() {
+        this.performCheck(); // 启动时立即执行一次
         this._planNextCheck();
     }
 
     _planNextCheck() {
-        const now = new Date();
-        const secondsPast5min = (now.getMinutes() % 5) * 60 + now.getSeconds();
-        let sleepMs = (300 - secondsPast5min + 15) * 1000;
-        if (sleepMs < 0) sleepMs += 300000;
+        if (this._nextCheckTimer) clearTimeout(this._nextCheckTimer);
 
-        setTimeout(async () => {
+        const now = Math.floor(Date.now() / 1000);
+        let nextCheckIn = 300; // 默认 5 分钟 (300秒)
+
+        // 1. 对齐到下一个 5 分钟周期的第 15 秒 (延迟 15 秒检查，确保主程序先跑代码)
+        const date = new Date();
+        const minutes = date.getMinutes();
+        const seconds = date.getSeconds();
+        const minutesToNextTick = 5 - (minutes % 5);
+
+        // 如果现在正好是 mm:00 ~ mm:14 之间，我们目标是 mm:15
+        // 如果现在 mm:20，目标是 mm+5:15
+        let totalSecondsToTarget;
+        if (minutes % 5 === 0 && seconds < 15) {
+            totalSecondsToTarget = 15 - seconds;
+        } else {
+            totalSecondsToTarget = (minutesToNextTick * 60) + 15 - seconds;
+        }
+        nextCheckIn = totalSecondsToTarget;
+
+        // 2. 精准截获重置时刻 (到点即查)
+        if (this._lastModels) {
+            for (const m of this._lastModels) {
+                if (m.reset_at) {
+                    const timeToReset = m.reset_at - now;
+                    if (timeToReset > 0 && timeToReset < nextCheckIn) {
+                        nextCheckIn = timeToReset;
+                    }
+                }
+            }
+        }
+
+        if (nextCheckIn < 1) nextCheckIn = 1;
+        if (outputChannel) outputChannel.appendLine(`Guardian: Next check in ${nextCheckIn}s (aligned to 15s mark)`);
+
+        this._nextCheckTimer = setTimeout(async () => {
             await this.performCheck();
             this._planNextCheck();
-        }, sleepMs);
+        }, nextCheckIn * 1000);
     }
 
     async performCheck() {
+        const bridgePath = path.join(os.homedir(), 'AppData', 'Roaming', 'Antigravity Booster', 'quota_bridge.json');
+
+        // 判定主程序是否活跃：如果 bridge 文件在 60 秒内被修改过，说明 Booster 正在工作
+        try {
+            if (fs.existsSync(bridgePath)) {
+                const stats = fs.statSync(bridgePath);
+                const lastModified = stats.mtimeMs;
+                const nowMs = Date.now();
+                if (nowMs - lastModified < 60000) {
+                    if (outputChannel) outputChannel.appendLine("Guardian: Booster is active (updated < 60s ago). Skipping plugin API fetch.");
+                    return; // Booster 还在工作，插件不抢活，也不记录 Buffer
+                }
+            }
+        } catch (e) { }
+
         const activeAcc = this._loadActiveAccount();
         if (!activeAcc) return;
 
@@ -120,6 +167,7 @@ class QuotaGuardian {
             }
 
             if (quota && quota.models) {
+                this._lastModels = quota.models;
                 if (this.onDataUpdated) this.onDataUpdated(quota);
                 this._recordToBuffer(activeAcc.id, activeAcc.name, quota);
             }
@@ -241,20 +289,19 @@ function activate(context) {
     const appDir = path.join(os.homedir(), 'AppData', 'Roaming', 'com.tz.antigravity-booster');
     const bridgePath = path.join(appDir, 'quota_bridge.json');
 
+    // 存储最新的 models 数据，用于定时刷新 tooltip
+    let latestModels = [];
+
     const reflectDataToUI = (data) => {
         // 1. 更新底部状态栏
         if (data.models && data.models.length > 0) {
+            latestModels = data.models;
             const shortParts = data.models.map(m => {
                 const sName = m.name.includes("Pro") ? "Pro" : (m.name.includes("Flash") ? "Flash" : (m.name.includes("Claude") ? "Claude" : m.name));
                 return `${sName}: ${Math.floor(m.percentage)}%`;
             });
             statusBarItem.text = `$(rocket) ${shortParts.join('  ')}`;
-
-            let md = "| Model | Usage | Reset |\n|---|---|---|\n";
-            data.models.forEach(m => {
-                md += `| ${m.name} | ${m.percentage.toFixed(1)}% | ${formatTimeLeft(m.reset_at)} |\n`;
-            });
-            statusBarItem.tooltip = new vscode.MarkdownString(md);
+            updateStatusBarTooltip();
             statusBarItem.show();
         }
 
@@ -264,6 +311,18 @@ function activate(context) {
             webviewProviderInstance.updateConfig({ bufferCount: guardianInstance.getBufferCount() });
         }
     };
+
+    const updateStatusBarTooltip = () => {
+        if (latestModels.length === 0) return;
+        let md = "| Model | Usage | Reset |\n|---|---|---|\n";
+        latestModels.forEach(m => {
+            md += `| ${m.name} | ${m.percentage.toFixed(1)}% | ${formatTimeLeft(m.reset_at)} |\n`;
+        });
+        statusBarItem.tooltip = new vscode.MarkdownString(md);
+    };
+
+    // 每 30 秒刷新一次 tooltip，确保重置时间显示正确
+    setInterval(updateStatusBarTooltip, 30000);
 
     const updateState = () => {
         try {
@@ -289,7 +348,19 @@ function activate(context) {
     };
 
     updateState();
-    fs.watchFile(bridgePath, { interval: 2000 }, () => updateState());
+
+    // 使用 fs.watch 代替 watchFile，实现真正的 OS 级别事件通知（后端写完，前端秒刷）
+    try {
+        const watcher = fs.watch(path.dirname(bridgePath), (eventType, filename) => {
+            if (filename === 'quota_bridge.json') {
+                updateState();
+            }
+        });
+        context.subscriptions.push({ dispose: () => watcher.close() });
+    } catch (e) {
+        // Fallback for some environments
+        fs.watchFile(bridgePath, { interval: 2000 }, () => updateState());
+    }
 
     context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(e => {
         if (e.affectsConfiguration('tfa.system.autoAccept')) {
@@ -308,6 +379,19 @@ function activate(context) {
     context.subscriptions.push(vscode.commands.registerCommand('antigravityBooster.showDetails', () => {
         vscode.window.showInformationMessage(`Antigravity Booster v1.3.5`);
     }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('antigravity.openRule', async () => {
+        const geminiRoot = path.join(os.homedir(), '.gemini');
+        const rulePath = path.join(geminiRoot, 'GEMINI.md');
+        if (!fs.existsSync(rulePath)) {
+            if (!fs.existsSync(geminiRoot)) {
+                try { fs.mkdirSync(geminiRoot, { recursive: true }); } catch (e) { }
+            }
+            try { fs.writeFileSync(rulePath, "# Antigravity Rules\n\n", "utf8"); } catch (e) { }
+        }
+        const doc = await vscode.workspace.openTextDocument(rulePath);
+        await vscode.window.showTextDocument(doc);
+    }));
 }
 
 function deactivate() { if (automationService) automationService.stop(); }
@@ -325,6 +409,8 @@ class BoosterWebviewProvider {
                 this.updateData(this._lastData);
             } else if (message.type === 'toggleAutoAccept') {
                 vscode.commands.executeCommand('antigravityBooster.toggleAutoAccept', message.val);
+            } else if (message.type === 'openRules') {
+                vscode.commands.executeCommand('antigravity.openRule');
             }
         });
     }
@@ -358,6 +444,7 @@ class BoosterWebviewProvider {
         <div><div style="font-size:13px;">自动同意 (Auto-Accept)</div><div style="font-size:10px; opacity:0.7;">自动同意 Agent 操作</div></div>
         <label class="switch"><input type="checkbox" id="auto-accept-toggle"><span class="slider"></span></label>
     </div>
+    <button class="btn" id="edit-rules-btn" style="width: 100%; padding: 8px; cursor: pointer; background: var(--button-bg); color: var(--button-fg); border: none; border-radius: 2px; font-size: 12px; margin-top: 10px;">编辑规则 (GEMINI.md)</button>
     <div class="footer"><span id="ver">v1.3.5</span><span id="buf">Buffered: 0</span></div>
     <script>
         const vscode = acquireVsCodeApi();
@@ -388,9 +475,9 @@ class BoosterWebviewProvider {
                     let color = percent <= 20 ? 'red' : (percent <= 50 ? 'orange' : '#2196F3');
                     const item = document.createElement('div');
                     item.className = 'gauge-item';
-                    item.innerHTML = \`<div class="gauge-circle" style="--deg: \${percent * 3.6}deg; --color: \${color}"><div class="gauge-val">\${percent}%</div></div>
-                                     <div class="gauge-label">\${m.name}</div>
-                                     <div class="gauge-reset">\${formatTimeLeft(m.reset_at)}</div>\`;
+                    item.innerHTML = '<div class="gauge-circle" style="--deg: ' + (percent * 3.6) + 'deg; --color: ' + color + '"><div class="gauge-val">' + percent + '%</div></div>' +
+                                     '<div class="gauge-label">' + m.name + '</div>' +
+                                     '<div class="gauge-reset">' + formatTimeLeft(m.reset_at) + '</div>';
                     container.appendChild(item);
                 });
             }
@@ -399,7 +486,9 @@ class BoosterWebviewProvider {
                 if (msg.payload.bufferCount !== undefined) document.getElementById('buf').innerText = 'Buffered: ' + msg.payload.bufferCount;
             }
         });
+
         toggle.addEventListener('change', (e) => vscode.postMessage({ type: 'toggleAutoAccept', val: e.target.checked }));
+        document.getElementById('edit-rules-btn').addEventListener('click', () => vscode.postMessage({ type: 'openRules' }));
         vscode.postMessage({ type: 'webviewReady' });
     </script></body></html>`;
     }

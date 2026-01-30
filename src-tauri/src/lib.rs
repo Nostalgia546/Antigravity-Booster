@@ -369,8 +369,8 @@ async fn pulse_check_quota(app: AppHandle, id: String, record_history: bool) -> 
         let _ = crate::history::record_quota_point(&app);
     }
     
-    // [重要] 这里的逻辑：如果这就是 switch_account 调用的那个“切换后”刷新，
-    // record_quota_point 会把当前最新的 accounts 状态（包括新 active 的账号）存入快照
+    // [重要] 通知前端数据已刷新，立即响应 UI 变化
+    let _ = app.emit("quota-updated", ());
     
     Ok(new_quota)
 }
@@ -952,9 +952,14 @@ async fn start_auto_refresh_task(app: AppHandle) {
                 if let Some(quota) = &acc.quota {
                     for model in &quota.models {
                         if let Some(reset_ts) = model.reset_at {
-                            let pre_reset_target = reset_ts - 30; // 重置前 30 秒
-                            if pre_reset_target > now_ts && pre_reset_target < next_run {
-                                next_run = pre_reset_target;
+                            // 1. 记录快照点：重置前 30 秒
+                            let snapshot_target = reset_ts - 30;
+                            if snapshot_target > now_ts && snapshot_target < next_run {
+                                next_run = snapshot_target;
+                            }
+                            // 2. 刷新数据点：重置时刻
+                            if reset_ts > now_ts && reset_ts < next_run {
+                                next_run = reset_ts;
                             }
                         }
                     }
@@ -962,8 +967,8 @@ async fn start_auto_refresh_task(app: AppHandle) {
             }
         }
         
-        // 判定是否是因为重置触发的抢占
-        let is_pre_reset_trigger = next_run < original_next_run;
+        // 判定是否是因为重置相关的抢占触发（快照或到点刷新）
+        let is_reset_event = next_run < original_next_run;
 
         let sleep_secs = (next_run - now_ts).max(1); // 缩短保底时间到 1s，提高整分检测精度
         sleep(Duration::from_secs(sleep_secs as u64)).await;
@@ -975,8 +980,8 @@ async fn start_auto_refresh_task(app: AppHandle) {
         let is_30_min_tick = minute % 30 == 0;
         let is_5_min_tick = minute % 5 == 0;
 
-        // 如果是预重置抢占触发，或者到了 5 分钟点，就执行刷新
-        if !is_5_min_tick && !is_pre_reset_trigger { 
+        // 如果是重置相关的事件，或者到了 5 分钟点，就执行刷新
+        if !is_5_min_tick && !is_reset_event { 
             continue; 
         } 
 
@@ -1000,8 +1005,8 @@ async fn start_auto_refresh_task(app: AppHandle) {
             if let Some(q) = &acc.quota {
                 for m in &q.models {
                     if let Some(r_ts) = m.reset_at {
-                        // 窗口放大到 120 秒，确保抢占唤醒后一定能触发刷新
-                        if r_ts > current_ts && (r_ts - current_ts) < 120 {
+                        // 窗口扩大，确保在快照点（-30s）和重置点都能涵盖到
+                        if r_ts > current_ts && (r_ts - current_ts) < 45 {
                             acc_near_reset = true;
                             break;
                         }
@@ -1053,9 +1058,17 @@ async fn start_auto_refresh_task(app: AppHandle) {
             
             // 决定是否记录快照
             // 只有在 30 分钟整点、重置抢占成功、或者这是该账号第一次初始化数据时才记录
-            if is_30_min_tick || is_pre_reset_trigger {
+            // 决定是否记录快照
+            // 策略：如果是 30 分钟整点，或者是我们刻意在重置前 30 秒抢占的那个点，则记录记录历史
+            let is_pre_reset_snapshot_point = accounts.iter().any(|a| {
+                a.quota.as_ref().map_or(false, |q| {
+                    q.models.iter().any(|m| m.reset_at.map_or(false, |ts| (ts - current_ts).abs() < 35 && (ts - current_ts) > 20))
+                })
+            });
+
+            if is_30_min_tick || is_pre_reset_snapshot_point {
                 let _ = history::record_quota_point(&app);
-                log_event(&app, "[Task] 30min snapshot or pre-reset recorded.");
+                log_event(&app, "[Task] Pre-reset snapshot recorded.");
             }
             
             let _ = app.emit("quota-updated", ());

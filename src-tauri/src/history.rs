@@ -272,23 +272,13 @@ pub fn calculate_usage_buckets(
                     (val1 - val2).max(0.0)
                 };
                 
-                // 将该区间产生的消耗量分配到对应的桶中
-                let total_duration = (t2 - t1) as f64;
-                
+                // 简化逻辑：消耗量直接归到 t2 所在的桶（最后一个桶）
                 for b_idx in 0..bucket_count {
                     let b = &buckets[b_idx];
-                    
-                    // Overlap between [t1, t2] and [b.start, b.end]
-                    let overlap_start = t1.max(b.start_time);
-                    let overlap_end = t2.min(b.end_time);
-                    
-                    if overlap_end > overlap_start {
-                        let overlap_duration = (overlap_end - overlap_start) as f64;
-                        let weight = overlap_duration / total_duration;
-                        let amount = consumed * weight;
-                        
+                    if t2 > b.start_time && t2 <= b.end_time {
                         distribution.entry(key.clone())
-                            .or_insert_with(|| vec![0.0; bucket_count])[b_idx] += amount;
+                            .or_insert_with(|| vec![0.0; bucket_count])[b_idx] += consumed;
+                        break;
                     }
                 }
             }

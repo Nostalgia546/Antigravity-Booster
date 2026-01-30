@@ -186,6 +186,11 @@ onMounted(async () => {
   await syncData();
   await loadChartData();
   
+  // 启动即刷新活跃账号用量，确保用户看到的是最新的
+  if (store.activeAccount) {
+    handleRefreshActive();
+  }
+  
   // Listen for backend debug logs
   listen('debug-log', (event: any) => {
      const raw = event.payload as string;
